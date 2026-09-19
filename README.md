@@ -5,6 +5,16 @@
 ```bat
 cd trycord-server
 npm install
+copy .env.example .env
+```
+
+Edit `.env` — required: `JWT_SECRET` (generate one), plus a database
+(`DB_CLIENT=sqlite` + `DB_FILE=./dev.db` for local dev, or your own MySQL —
+see `.env.example`). The server refuses to start without them and never
+creates a database implicitly.
+
+```bat
+npm run seed
 npm start
 ```
 
@@ -23,5 +33,7 @@ npm run seed
 Login with `demo` / `demo1234`, or register your own user.
 Join a server with its join code (the seed prints one, e.g. `lobby`).
 
-Config is optional (`trycord-server/.env`, see `.env.example`).
+This branch is the self-hosting backend: API, WebSocket gateway, and access
+to the administrator's database. It owns all instance data. See `main` for
+the full architecture (access points, global sync, MySQL setup, migration).
 Full repo (client + desktop app) lives on `main`.
