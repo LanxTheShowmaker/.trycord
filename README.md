@@ -1,11 +1,11 @@
 # .trycord — client + desktop app (`client` branch)
 
 `trycord-client/` is the static web client. The easiest way to use it:
-start the server (on `main` / `server` branch) and open http://localhost:3000.
+start the server (on `main` / `server` branch) and open http://localhost:9971.
 
 ## Desktop app (Discord-style window)
 
-Needs the server running at http://localhost:3000.
+Needs the server running at http://localhost:9971 (server defaults: `HOST=0.0.0.0`, `PORT=9971`).
 
 ```bat
 cd trycord-desktop
