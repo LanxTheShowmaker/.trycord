@@ -55,9 +55,10 @@
       var b = document.createElement('button');
       b.type = 'button';
       b.className = 'btn' + (a.primary ? ' btn-primary' : '') + (a.danger ? ' btn-danger' : '');
+      if (a.id) b.dataset.action = a.id;
       b.textContent = a.label;
       b.onclick = () => {
-        if (a.onClick) a.onClick(close);
+        if (a.onClick) a.onClick(close, { primary: foot.querySelector('.btn-primary'), all: foot });
         else close();
       };
       foot.appendChild(b);
@@ -161,18 +162,128 @@
   function setLoading(btn, loading, label) {
     if (!btn) return;
     if (loading) {
-      btn.dataset.label = btn.textContent;
+      btn.dataset.label = btn.innerHTML;
       btn.disabled = true;
-      btn.textContent = label || 'Working…';
+      btn.innerHTML = esc(label || 'Working…');
     } else {
       btn.disabled = false;
-      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+      if (btn.dataset.label) btn.innerHTML = btn.dataset.label;
     }
+  }
+
+  function icon(name, cls) {
+    return '<svg class="icon ' + (cls || '') + '" aria-hidden="true"><use href="#i-' + name + '"></use></svg>';
+  }
+
+  // Context / dropdown menu. items: [{icon, label, hint?, danger?, disabled?, action?}]
+  // Returns a close fn. Esc + outside click close; first item autofocused.
+  function menu(anchor, items, opts) {
+    opts = opts || {};
+    closeMenu();
+    var m = document.createElement('div');
+    m.className = 'menu';
+    m.setAttribute('role', 'menu');
+    if (opts.label) {
+      var head = document.createElement('div');
+      head.className = 'menu-head';
+      head.textContent = opts.label;
+      m.appendChild(head);
+    }
+    var visible = items.filter((i) => !i.hidden);
+    visible.forEach((item, idx) => {
+      if (item.sep) {
+        var sep = document.createElement('div');
+        sep.className = 'menu-sep';
+        m.appendChild(sep);
+        return;
+      }
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'menuitem');
+      if (item.danger) b.className = 'danger';
+      if (item.disabled) b.disabled = true;
+      b.innerHTML = (item.icon ? icon(item.icon) : '') + '<span></span>';
+      b.querySelector('span').textContent = item.label;
+      if (item.hint) {
+        var hint = document.createElement('small');
+        hint.className = 'muted';
+        hint.style.marginLeft = 'auto';
+        hint.textContent = item.hint;
+        b.appendChild(hint);
+      }
+      b.onclick = () => {
+        closeMenu();
+        if (item.action) item.action();
+      };
+      m.appendChild(b);
+      if (idx === 0) setTimeout(() => b.focus(), 0);
+    });
+    document.getElementById('menu-root').appendChild(m);
+    var r = anchor.getBoundingClientRect();
+    m.style.top = Math.min(window.innerHeight - m.offsetHeight - 8, r.bottom + 6) + 'px';
+    m.style.left = Math.max(8, Math.min(window.innerWidth - m.offsetWidth - 8, r.left)) + 'px';
+    function onKey(e) {
+      if (e.key === 'Escape') closeMenu();
+    }
+    function onDoc(e) {
+      if (!m.contains(e.target)) closeMenu();
+    }
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => document.addEventListener('mousedown', onDoc), 0);
+    function closeMenu() {
+      if (m.isConnected) m.remove();
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDoc);
+    }
+    m._close = closeMenu;
+    return closeMenu;
+  }
+
+  function closeMenu() {
+    document.querySelectorAll('#menu-root .menu').forEach((m) => {
+      if (m._close) m._close();
+      else m.remove();
+    });
+  }
+
+  // Backend/network errors -> contextual human copy. Never leaks internals.
+  function friendlyError(e, context) {
+    var code = (e && e.code) || '';
+    switch (code) {
+      case 'OFFLINE': return 'The Trycord server didn’t respond. Check that it’s running and reachable.';
+      case 'SESSION_REVOKED':
+      case 'AUTH_REQUIRED': return 'Your session expired. Please log in again.';
+      case 'NOT_A_MEMBER': return 'You’re not a member of this server.';
+      case 'PERMISSION_DENIED': return 'You don’t have permission to do that here.';
+      case 'SERVER_PRIVATE': return 'This server is private — you need an invite.';
+      case 'SERVER_NOT_FOUND': return 'That server doesn’t exist (or is private).';
+      case 'INVITE_INVALID': return 'Invite not found. Check the code and try again.';
+      case 'INVITE_EXPIRED': return 'That invite has expired.';
+      case 'INVITE_EXHAUSTED': return 'That invite has no uses left.';
+      case 'INVITE_REVOKED': return 'That invite was revoked.';
+      case 'ALREADY_MEMBER': return 'You’re already a member.';
+      case 'VALIDATION_ERROR': return (e && e.message) || 'Please check your input and try again.';
+      default:
+        if (context === 'server') return 'Couldn’t load this server. The Trycord server didn’t respond.';
+        if (context === 'messages') return 'Couldn’t load messages. Try again in a moment.';
+        return (e && e.message) || 'Something went wrong. Please retry.';
+    }
+  }
+
+  function dayLabel(iso) {
+    var d = new Date(iso);
+    if (isNaN(d)) return '';
+    var today = new Date();
+    var yesterday = new Date(Date.now() - 86400000);
+    var sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    if (sameDay(d, today)) return 'Today';
+    if (sameDay(d, yesterday)) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
   }
 
   window.TrycordUi = {
     esc, toast, openModal, confirmDialog, skeletons,
     emptyState, errorState, avatarHtml, badge, timeAgo, fullDate,
-    fieldError, setLoading,
+    fieldError, setLoading, icon, menu, closeMenu, friendlyError, dayLabel,
   };
 })();

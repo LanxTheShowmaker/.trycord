@@ -151,10 +151,10 @@
         paint();
       } catch (e) {
         if (reset) {
-          out.innerHTML = Ui.errorState(e.message);
+          out.innerHTML = Ui.errorState(Ui.friendlyError(e));
           var rb = out.querySelector('[data-retry]');
           if (rb) rb.onclick = () => load(true);
-        } else Ui.toast(e.message, 'bad');
+        } else Ui.toast(Ui.friendlyError(e), 'bad');
       }
       loading = false;
     }
@@ -361,7 +361,7 @@
         };
       });
     } catch (e) {
-      box.innerHTML = Ui.errorState(e.message);
+      box.innerHTML = Ui.errorState(Ui.friendlyError(e));
       var rb = box.querySelector('[data-retry]');
       if (rb) rb.onclick = () => activity(root);
     }

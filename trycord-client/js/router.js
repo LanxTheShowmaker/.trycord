@@ -1,6 +1,8 @@
 /* Hash router with auth guards. Public: #/ #/login #/register.
-   App (require session): everything else. */
+   App (require session): everything else. Toggles shell context
+   (browse vs server) so layout adapts. */
 (function () {
+  var Ui = window.TrycordUi;
   var C = window.TrycordComponents;
   var Pub = window.TrycordPagesPublic;
   var Home = window.TrycordPagesHome;
@@ -13,10 +15,10 @@
     document.getElementById('shell-app').hidden = which !== 'app';
   }
 
-  function closeNav() {
-    document.body.classList.remove('nav-open');
-    document.getElementById('sidebar-scrim').hidden = true;
+  function closeDrawers() {
+    document.body.classList.remove('nav-open', 'panel-open');
     document.getElementById('nav-toggle').setAttribute('aria-expanded', 'false');
+    document.getElementById('panel-toggle').setAttribute('aria-expanded', 'false');
   }
 
   function parse() {
@@ -34,13 +36,18 @@
     return { name: 'unknown' };
   }
 
+  function activeNav(name) {
+    if (name === 'workspace' || name === 'preview') return '#/servers';
+    return '#/' + name;
+  }
+
   var navigating = false;
   async function route() {
     if (navigating) return;
     navigating = true;
     try {
-      C.closeMenus();
-      closeNav();
+      Ui.closeMenu();
+      closeDrawers();
       if (window.TrycordPagesWorkspace && TrycordPagesWorkspace.cleanup) {
         TrycordPagesWorkspace.cleanup();
       }
@@ -68,19 +75,25 @@
         return;
       }
       showShell('app');
-      C.renderSidebar('#/' + r.name.split('/')[0]);
-      C.renderUser();
       var view = document.getElementById('view');
       view.classList.remove('view-wide');
+
+      var isServer = r.name === 'workspace';
+      document.body.dataset.ctx = isServer ? 'server' : 'browse';
+      document.getElementById('server-nav').hidden = !isServer;
+      document.getElementById('back-btn').hidden = !isServer;
+      document.getElementById('panel-toggle').hidden = !isServer;
+      var active = activeNav(r.name);
+      var serverId = isServer ? r.id : null;
+      C.renderRail(active, serverId, Trycord.unreadServers());
+      C.renderMobilebar(active);
+      C.renderAccount();
 
       switch (r.name) {
         case 'home': await Home.home(view); break;
         case 'servers': Browse.servers(view); break;
         case 'discover': await Browse.discover(view); break;
-        case 'preview':
-          C.renderSidebar('#/discover');
-          await Browse.preview(view, r.id);
-          break;
+        case 'preview': await Browse.preview(view, r.id); break;
         case 'join': Browse.join(view); break;
         case 'activity': await Browse.activity(view); break;
         case 'favorites': Browse.favorites(view); break;
@@ -88,7 +101,6 @@
         case 'settings': Acct.settings(view); break;
         case 'workspace':
           view.classList.add('view-wide');
-          C.renderSidebar('#/servers');
           await Ws.workspace(view, r.id, r.tab, r.channel);
           break;
         default: location.hash = '#/home'; return;
@@ -101,5 +113,5 @@
     }
   }
 
-  window.TrycordRouter = { route };
+  window.TrycordRouter = { route, parse };
 })();

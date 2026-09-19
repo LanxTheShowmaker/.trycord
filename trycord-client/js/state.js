@@ -1,10 +1,18 @@
-/* Client state, split into three scopes:
+/* Client state, three scopes:
    - access-point config:  which instance to talk to (this device's pointer)
-   - instance state:       token, favorites, recent — namespaced per instance
-   - global state:         appearance (theme/density), shared across instances
-   apiBase is access config, NOT a user preference: it selects the instance,
-   so it lives outside the namespaced and global buckets. */
+   - instance state:       token, favorites, recent, mutes, read marks,
+                           collapsed categories, last channels — namespaced
+   - global state:         appearance + notification prefs, shared across
+                           instances on this browser (never tokens/URLs)
+   apiBase is access config, NOT a user preference. */
 (function () {
+  var ACCENTS = {
+    teal: { main: '#3ddbb9', ink: '#052925' },
+    violet: { main: '#9d8cff', ink: '#1d1440' },
+    amber: { main: '#f5b14c', ink: '#3a2200' },
+    blue: { main: '#5aa9ff', ink: '#0a2547' },
+  };
+
   function load(key, fallback) {
     try {
       var raw = localStorage.getItem(key);
@@ -16,6 +24,9 @@
   }
   function drop(key) {
     try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+  }
+  function rawGet(key) {
+    try { return localStorage.getItem(key); } catch (e) { return null; }
   }
 
   function instanceSlug() {
@@ -39,14 +50,9 @@
   var slug = instanceSlug();
   var NS = 'trycord:' + slug + ':';
 
-  function rawGet(key) {
-    try { return localStorage.getItem(key); } catch (e) { return null; }
-  }
-
-  // One-time upgrade: import flat legacy keys into this instance's namespace.
-  // Tokens are stored raw (never JSON-encoded) to match the session format.
-  function migrateLegacy() {
-    if (rawGet(NS + 'token') !== null) return; // already migrated (or logged in)
+  // One-time upgrade from the old flat keys into this instance's namespace.
+  (function migrateLegacy() {
+    if (rawGet(NS + 'token') !== null) return;
     var legacyToken = rawGet('trycord.token');
     if (legacyToken) {
       try { localStorage.setItem(NS + 'token', legacyToken); } catch (e) { /* ignore */ }
@@ -54,7 +60,7 @@
       save(NS + 'recent', load('trycord.recent', []));
       ['trycord.token', 'trycord.favorites', 'trycord.recent'].forEach(drop);
     }
-  }
+  })();
 
   // Access config migration: apiBase used to live in settings.
   var access = load('trycord.access', null) || { apiBase: '' };
@@ -76,9 +82,18 @@
     access,
     favorites: load(NS + 'favorites', []),
     recent: load(NS + 'recent', []),
-    // Global preferences: deliberately shared across instances on this browser.
+    mutedServers: load(NS + 'muted', { servers: [], channels: [] }),
+    collapsed: load(NS + 'collapsed', {}), // serverId -> [categoryId]
+    read: load(NS + 'read', {}),           // channelId -> ISO ts last seen
+    lastChannel: load(NS + 'lastChannel', {}), // serverId -> channelId
+    tch: {}, // session-only: channelId -> latest known message ts
+    ui: Object.assign({ memberPanel: true }, load('trycord.ui', {})),
+    // Global preferences, shared across instances on this browser.
     settings: Object.assign(
-      { theme: 'dark', density: 'comfortable' },
+      {
+        theme: 'dark', accent: 'teal', density: 'comfortable', contrast: 'normal',
+        motion: 'system', fontScale: 1, notif: { desktop: false },
+      },
       load('trycord.settings', {})
     ),
 
@@ -90,13 +105,26 @@
       save('trycord.settings', State.settings);
       State.applyAppearance();
     },
-    applyAppearance() {
-      document.documentElement.dataset.theme = State.settings.theme || 'dark';
-      document.documentElement.dataset.density = State.settings.density || 'comfortable';
+    saveUi() {
+      save('trycord.ui', State.ui);
     },
+    applyAppearance() {
+      var s = State.settings;
+      var root = document.documentElement;
+      root.dataset.theme = s.theme === 'light' ? 'light' : 'dark';
+      root.dataset.density = s.density === 'compact' ? 'compact' : 'comfortable';
+      root.dataset.contrast = s.contrast === 'high' ? 'high' : 'normal';
+      root.dataset.motion = s.motion === 'off' ? 'off' : (s.motion === 'on' ? 'on' : 'system');
+      var a = ACCENTS[s.accent] || ACCENTS.teal;
+      root.style.setProperty('--accent', a.main);
+      root.style.setProperty('--accent-ink', a.ink);
+      var fs = Number(s.fontScale) || 1;
+      fs = Math.min(1.2, Math.max(0.9, fs));
+      root.style.setProperty('--fs', fs);
+    },
+
     setServers(list) {
       State.servers = Array.isArray(list) ? list : [];
-      // prune favorites/recent for servers we no longer belong to
       var ids = {};
       State.servers.forEach((s) => { ids[s.id] = true; });
       State.favorites = State.favorites.filter((id) => ids[id]);
@@ -104,8 +132,6 @@
       save(NS + 'favorites', State.favorites);
       save(NS + 'recent', State.recent);
     },
-    // Effective access for the open server: { is_owner, permissions[] }.
-    // '*' means all permissions (owner). Always mirrored by the backend.
     setPerms(serverId, accessPerms) {
       State.perms[serverId] = accessPerms || { is_owner: false, permissions: [] };
     },
@@ -121,6 +147,8 @@
       }
       return null;
     },
+
+    // Favorites / recents (instance-scoped)
     isFav(id) { return State.favorites.indexOf(id) !== -1; },
     toggleFav(id) {
       var i = State.favorites.indexOf(id);
@@ -135,19 +163,88 @@
       ).slice(0, 8);
       save(NS + 'recent', State.recent);
     },
+
+    // Mutes (instance-scoped server preferences)
+    isMutedServer(id) { return State.mutedServers.servers.indexOf(id) !== -1; },
+    isMutedChannel(id) { return State.mutedServers.channels.indexOf(id) !== -1; },
+    toggleMuteServer(id) {
+      var l = State.mutedServers.servers;
+      var i = l.indexOf(id);
+      if (i === -1) l.push(id);
+      else l.splice(i, 1);
+      save(NS + 'muted', State.mutedServers);
+      return i === -1;
+    },
+    toggleMuteChannel(id) {
+      var l = State.mutedServers.channels;
+      var i = l.indexOf(id);
+      if (i === -1) l.push(id);
+      else l.splice(i, 1);
+      save(NS + 'muted', State.mutedServers);
+      return i === -1;
+    },
+
+    // Collapsed categories per server (instance-scoped UI pref)
+    isCollapsed(serverId, catId) {
+      return (State.collapsed[serverId] || []).indexOf(catId) !== -1;
+    },
+    setCollapsed(serverId, catId, closed) {
+      var l = State.collapsed[serverId] || (State.collapsed[serverId] = []);
+      var i = l.indexOf(catId);
+      if (closed && i === -1) l.push(catId);
+      if (!closed && i !== -1) l.splice(i, 1);
+      save(NS + 'collapsed', State.collapsed);
+    },
+    resetCollapsed(serverId) {
+      delete State.collapsed[serverId];
+      save(NS + 'collapsed', State.collapsed);
+    },
+
+    // Read marks (instance-scoped) + session latest timestamps
+    lastSeen(channelId) { return State.read[channelId] || null; },
+    markRead(channelId, iso) {
+      State.read[channelId] = iso || new Date().toISOString();
+      // cap growth
+      var keys = Object.keys(State.read);
+      if (keys.length > 200) {
+        keys.slice(0, keys.length - 200).forEach((k) => delete State.read[k]);
+      }
+      save(NS + 'read', State.read);
+    },
+    touchChannel(channelId, iso) {
+      if (!iso) return;
+      if (!State.tch[channelId] || iso > State.tch[channelId]) State.tch[channelId] = iso;
+    },
+    channelUnread(channelId) {
+      if (State.isMutedChannel(channelId)) return false;
+      var seen = State.lastSeen(channelId);
+      var latest = State.tch[channelId];
+      if (!latest) return false;
+      return !seen || latest > seen;
+    },
+    setLastChannel(serverId, channelId) {
+      State.lastChannel[serverId] = channelId;
+      save(NS + 'lastChannel', State.lastChannel);
+    },
+    getLastChannel(serverId) { return State.lastChannel[serverId] || null; },
+
     clearLocal() {
       State.favorites = [];
       State.recent = [];
-      save(NS + 'favorites', []);
-      save(NS + 'recent', []);
+      State.mutedServers = { servers: [], channels: [] };
+      State.read = {};
+      State.collapsed = {};
+      State.lastChannel = {};
+      [NS + 'favorites', NS + 'recent', NS + 'muted', NS + 'read',
+        NS + 'collapsed', NS + 'lastChannel'].forEach(drop);
     },
   };
 
-  migrateLegacy();
   // Re-read in case migration just populated this instance.
   State.favorites = load(NS + 'favorites', State.favorites);
   State.recent = load(NS + 'recent', State.recent);
 
   State.applyAppearance();
   window.TrycordState = State;
+  window.TrycordAccents = ACCENTS;
 })();
