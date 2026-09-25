@@ -5,16 +5,18 @@ const crypto = require('crypto');
 const db = require('../src/db');
 const servers = require('../src/services/servers');
 const invites = require('../src/services/invites');
-
+require('dotenv').config();
 async function main() {
   await db.connect();
 
   let user = await db.get('SELECT * FROM users WHERE username = ?', ['demo']);
   if (!user) {
     const id = crypto.randomUUID();
+    const { TERMS_VERSION, PRIVACY_VERSION } = require('../src/legal');
+    const ts = new Date().toISOString();
     await db.run(
-      'INSERT INTO users (id, username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)',
-      [id, 'demo', 'Demo', bcrypt.hashSync('demo1234', 10), new Date().toISOString()]
+      'INSERT INTO users (id, username, display_name, password_hash, created_at, terms_version, privacy_version, terms_accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, 'demo', 'Demo', bcrypt.hashSync('demo1234', 10), ts, TERMS_VERSION, PRIVACY_VERSION, ts]
     );
     user = await db.get('SELECT * FROM users WHERE id = ?', [id]);
   }

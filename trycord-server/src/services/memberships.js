@@ -9,22 +9,25 @@ async function get(serverId, userId, conn = db) {
 }
 
 async function list(serverId) {
-  const members = await db.all(
-    `SELECT u.id, u.username, u.display_name, m.nickname, m.joined_at,
-      CASE WHEN u.id = s.owner_id THEN 1 ELSE 0 END AS is_owner
-    FROM server_members m
-    JOIN users u ON u.id = m.user_id
-    JOIN servers s ON s.id = m.server_id
-    WHERE m.server_id = ?
-    ORDER BY is_owner DESC, m.joined_at ASC`,
-    [serverId]
-  );
-  const roleRows = await db.all(
-    `SELECT mr.user_id, r.id, r.name, r.position FROM member_roles mr
-     JOIN roles r ON r.id = mr.role_id
-     WHERE mr.server_id = ? ORDER BY r.position DESC`,
-    [serverId]
-  );
+  // Member rows and their roles are independent queries — run together.
+  const [members, roleRows] = await Promise.all([
+    db.all(
+      `SELECT u.id, u.username, u.display_name, u.avatar_url, m.nickname, m.joined_at,
+        CASE WHEN u.id = s.owner_id THEN 1 ELSE 0 END AS is_owner
+      FROM server_members m
+      JOIN users u ON u.id = m.user_id
+      JOIN servers s ON s.id = m.server_id
+      WHERE m.server_id = ?
+      ORDER BY is_owner DESC, m.joined_at ASC`,
+      [serverId]
+    ),
+    db.all(
+      `SELECT mr.user_id, r.id, r.name, r.position FROM member_roles mr
+       JOIN roles r ON r.id = mr.role_id
+       WHERE mr.server_id = ? ORDER BY r.position DESC`,
+      [serverId]
+    ),
+  ]);
   const byUser = {};
   for (const r of roleRows) {
     (byUser[r.user_id] = byUser[r.user_id] || []).push({ id: r.id, name: r.name });
@@ -33,8 +36,13 @@ async function list(serverId) {
 }
 
 async function joinInner(serverId, userId, username, conn) {
-  const srv = await conn.get('SELECT id FROM servers WHERE id = ?', [serverId]);
+  const srv = await conn.get('SELECT id, enforcement_state FROM servers WHERE id = ?', [serverId]);
   if (!srv) throw { code: 'SERVER_NOT_FOUND', message: 'server not found' };
+  // Trust & Safety: suspended servers are closed to new members. Existing
+  // members are handled by the access chain (resolveServer).
+  if (srv.enforcement_state === 'suspended') {
+    throw { code: 'SERVER_SUSPENDED', message: 'server is suspended' };
+  }
   if (await get(serverId, userId, conn)) throw { code: 'ALREADY_MEMBER', message: 'already a member' };
   await conn.run(
     'INSERT INTO server_members (id, user_id, server_id, nickname, joined_at) VALUES (?, ?, ?, ?, ?)',
@@ -73,6 +81,25 @@ async function leave(serverId, userId) {
   });
 }
 
+// Set or clear a member's per-community nickname. The route gates who may
+// call this (self = anyone; others = staff with KICK_MEMBERS). NULL clears.
+async function setNickname(serverId, targetId, nickname, conn = db) {
+  const clean = String(nickname == null ? '' : nickname).trim();
+  if (clean && (clean.length < 2 || clean.length > 32)) {
+    const e = new Error('nickname must be 2-32 characters');
+    e.code = 'VALIDATION_ERROR'; throw e;
+  }
+  if (!(await get(serverId, targetId, conn))) {
+    const e = new Error('not a member');
+    e.code = 'NOT_A_MEMBER'; throw e;
+  }
+  await conn.run(
+    'UPDATE server_members SET nickname = ? WHERE server_id = ? AND user_id = ?',
+    [clean || null, serverId, targetId]
+  );
+  return { serverId, userId: targetId, nickname: clean || null };
+}
+
 async function kick(serverId, actorId, targetId) {
   return db.transaction(async (t) => {
     const srv = await t.get('SELECT owner_id FROM servers WHERE id = ?', [serverId]);
@@ -97,4 +124,4 @@ async function kick(serverId, actorId, targetId) {
   });
 }
 
-module.exports = { get, list, join, joinByCode, joinIn, leave, kick };
+module.exports = { get, list, join, joinByCode, joinIn, leave, kick, setNickname };

@@ -13,9 +13,23 @@ const cors = require('cors');
 const db = require('./db');
 const createGateway = require('./ws');
 const inviteRoutes = require('./routes/invites');
+const enforcement = require('./services/enforcement');
 
 const PORT = parseInt(process.env.PORT || '9971', 10);
-const HOST = process.env.HOST || '0.0.0.0';
+// §11 host type is validated strictly: exactly "express" (direct exposure)
+// or "nginx" (reverse-proxy deployment). Anything else is a hard startup
+// error — never silently fall back to a different topology.
+const HOST_TYPE = String(process.env.SERVER_HOST_TYPE || '').trim().toLowerCase();
+if (HOST_TYPE && HOST_TYPE !== 'express' && HOST_TYPE !== 'nginx') {
+  throw new Error('Invalid SERVER_HOST_TYPE. Expected "express" or "nginx".');
+}
+const nginxMode = HOST_TYPE === 'nginx';
+// §14/normal bind: in nginx mode the public listener is nginx, so Express
+// binds loopback unless the deployment explicitly requires another interface.
+// In express mode keep the existing direct-exposure default. dotenv injects
+// HOST from .env, so the per-mode default only applies when HOST is unset.
+const HOST = nginxMode ? (process.env.HOST || '127.0.0.1') : (process.env.HOST || '0.0.0.0');
+const isLoopbackHost = (h) => h === '127.0.0.1' || h === '::1' || h === '[::1]' || h === 'localhost' || /^127\./.test(h);
 
 function instanceConfig() {
   return {
@@ -59,11 +73,50 @@ async function boot() {
     );
   }
   const inst = instanceConfig();
+  console.log('[info] host type: ' + (nginxMode ? 'nginx (reverse proxy in front of :' + PORT + ')' : 'express (direct)'));
+  // §12 mode-specific validation: surface obviously inconsistent topology at
+  // boot instead of failing later at request time.
+  if (nginxMode) {
+    if (inst.publicUrl) {
+      try {
+        const pub = new URL(inst.publicUrl);
+        if (pub.port) {
+          console.warn('[warn] nginx mode: TRYCORD_PUBLIC_URL includes a port — the public origin should be the bare site URL (e.g. https://trycord.dev), not an upstream port.');
+        }
+        if (inst.clientOrigins.length && !inst.clientOrigins.includes(pub.origin)) {
+          console.warn('[warn] nginx mode: CLIENT_ORIGIN does not include the public origin (' + pub.origin + ') — CORS may be misconfigured.');
+        }
+      } catch { /* publicUrl invalid; other paths handle it */ }
+    }
+    if (process.env.HOST && !isLoopbackHost(process.env.HOST)) {
+      console.warn('[warn] nginx mode: HOST=' + process.env.HOST + ' is not a loopback interface. The public listener is nginx — keep Express on 127.0.0.1 unless the deployment explicitly requires another interface.');
+    }
+    if (String(process.env.TRUST_PROXY || '').trim() !== '1') {
+      console.warn('[warn] nginx mode: TRUST_PROXY=1 is not set. Client IPs and HTTPS detection will be wrong behind the proxy. Set it only when a proxy on the same host (nginx) is actually in front of Express.');
+    }
+  } else if (inst.publicUrl) {
+    try {
+      const u = new URL(inst.publicUrl);
+      if (u.port && String(parseInt(u.port, 10)) !== String(PORT)) {
+        console.warn('[warn] express mode: PUBLIC URL port ' + u.port + ' differs from listener port ' + PORT + ' — public links may not reach this listener as configured.');
+      }
+    } catch { /* publicUrl invalid; other paths handle it */ }
+  }
   await db.connect();
   console.log(`[info] database connected (${db.dialect})`);
 
   const app = express();
   const server = http.createServer(app);
+  // §76 proxy trust is deliberate and narrow: only a proxy on the loopback
+  // interface (nginx on the same host, which fronts Cloudflare in the
+  // documented production layout) may supply X-Forwarded-* headers. Arbitrary
+  // clients can never spoof their remote address, so rate limiting and
+  // HTTPS detection keep using the real client identity. Leave TRUST_PROXY
+  // unset unless the deployment actually has such a proxy.
+  if (String(process.env.TRUST_PROXY || '').trim() === '1') {
+    app.set('trust proxy', 'loopback');
+    console.log('[info] TRUST_PROXY=1: trusting X-Forwarded-* from loopback only');
+  }
   app.use(cors(corsOptions(inst.clientOrigins)));
   if (inst.clientOrigins.length) {
     console.log('[info] CORS allowlist: ' + inst.clientOrigins.join(', '));
@@ -72,11 +125,70 @@ async function boot() {
   }
   app.use(express.json({ limit: '1mb' }));
 
-  const uploadsDir = path.join(__dirname, '..', 'uploads');
-  fs.mkdirSync(uploadsDir, { recursive: true });
-  app.use('/uploads', express.static(uploadsDir));
+  // Request IDs for correlating logs and error reports. Cheap, no PII.
+  app.use((req, res, next) => {
+    req.requestId = Math.random().toString(36).slice(2, 10);
+    res.set('X-Request-Id', req.requestId);
+    next();
+  });
+
+  // Security headers. Hardens the app surface without breaking the
+  // documented cross-instance feature (the client can be pointed at another
+  // API origin at runtime), so CSP connect/src origins are derived from
+  // runtime config plus a per-instance allowlist knob (CSP_CONNECT_ORIGINS
+  // in .env, comma-separated). The real app page has no inline scripts, so
+  // script-src is strict; the static showcase gallery is dev-only and
+  // exempted from that one rule.
+  const cspConnect = ['self', 'ws:', 'wss:'];
+  const cspImg = ['self', 'data:', 'blob:'];
+  const apiOrigin = ((process.env.TRYCORD_API_URL || '').trim() || inst.publicUrl || '');
+  const addCspOrigin = (o) => {
+    try { const origin = new URL(o).origin; cspConnect.push(origin, origin.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:')); cspImg.push(origin); } catch { /* ignore unparseable */ }
+  };
+  [apiOrigin, inst.publicUrl, inst.globalUrl].forEach((o) => o && addCspOrigin(o));
+  ['http://localhost:9971', 'http://127.0.0.1:9971', 'https://trycord.dev'].forEach(addCspOrigin);
+  String(process.env.CSP_CONNECT_ORIGINS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean).forEach(addCspOrigin);
+  const buildCsp = (allowInlineScripts) => [
+    "default-src 'self'",
+    `connect-src ${[...new Set(cspConnect)].join(' ')}`,
+    allowInlineScripts ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    `img-src ${[...new Set(cspImg)].join(' ')}`,
+    "font-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+  const appCsp = buildCsp(false);
+  const showcaseCsp = buildCsp(true);
+  app.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy', req.path.indexOf('showcase') !== -1 ? showcaseCsp : appCsp);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()');
+    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+    next();
+  });
+
+  // Attachment storage exists on disk but is NEVER mounted as a public
+  // static directory: every read goes through the authenticated
+  // /api/attachments/:id route (see routes/attachments.js).
+  require('./services/uploads');
 
   app.get('/health', (req, res) => res.json({ ok: true }));
+  // Readiness: process alive AND database answering. Load balancers and
+  // the desktop smoke test use this to know traffic is safe.
+  app.get('/ready', async (req, res) => {
+    try {
+      await db.get('SELECT 1');
+      res.json({ ok: true, instanceId: inst.instanceId });
+    } catch {
+      res.status(503).json({ ok: false });
+    }
+  });
   app.get('/api/health', async (req, res) => {
     try {
       await db.get('SELECT 1');
@@ -88,11 +200,12 @@ async function boot() {
 
   // Safe public instance metadata. Never secrets, paths, or credentials.
   app.get('/api/instance', (req, res) => {
+    const mail = require('./auth/mail');
     res.json({
       instanceId: inst.instanceId,
       name: inst.name,
       globalSync: inst.globalUrl !== '',
-      features: { publicDiscovery: true, uploads: true },
+      features: { publicDiscovery: true, uploads: true, email: mail.mode() === 'smtp' && !!process.env.SMTP_HOST },
     });
   });
 
@@ -111,6 +224,17 @@ async function boot() {
     );
   });
 
+  // Public legal document versions (no auth): the client shows these exact
+  // versions at registration and records acceptance against them.
+  app.get('/api/legal', (req, res) => {
+    const legal = require('./legal');
+    res.json({
+      termsVersion: legal.TERMS_VERSION,
+      privacyVersion: legal.PRIVACY_VERSION,
+      updated: legal.LEGAL_UPDATED,
+    });
+  });
+
   app.use('/api/auth', require('./routes/auth'));
   app.use('/api/users', require('./routes/users'));
   app.use('/api/servers/:serverId/channels', require('./routes/channels'));
@@ -118,10 +242,17 @@ async function boot() {
   app.use('/api/servers/:serverId/roles', require('./routes/roles'));
   app.use('/api/servers/:serverId/invites', inviteRoutes.managed);
   app.use('/api/channels/:channelId/messages', require('./routes/messages'));
+  app.use('/api', require('./routes/attachments'));
   app.use('/api/servers', require('./routes/servers'));
   app.use('/api/invites', inviteRoutes.byCode);
   app.use('/api/discover', require('./routes/discover'));
   app.use('/api/activity', require('./routes/activity'));
+  app.use('/api/dms', require('./routes/dms'));
+  app.use('/api/friends', require('./routes/friends'));
+  app.use('/api/notifications', require('./routes/notifications'));
+  app.use('/api/reports', require('./routes/reports'));
+  app.use('/api/appeals', require('./routes/appeals'));
+  app.use('/api/admin', require('./routes/admin'));
 
   // Back-compat alias for older clients.
   app.get('/api/me', require('./middleware/auth'), async (req, res, next) => {
@@ -146,7 +277,20 @@ async function boot() {
   ]) {
     if (fs.existsSync(path.join(candidate, 'index.html'))) {
       clientDir = candidate;
-      app.use(express.static(candidate));
+      // Entry points are never cached (a stale index.html paired with fresh
+      // or stale JS/CSS is what renders a blank page). Versioned assets use
+      // conditional revalidation instead: browsers revalidate on every load
+      // (ETag), so new deploys are picked up immediately without giving up
+      // caching entirely.
+      app.use(express.static(candidate, {
+        setHeaders(res, filePath) {
+          if (/(^|[\\/])(index\.html|config\.js)$/i.test(filePath)) {
+            res.setHeader('Cache-Control', 'no-store');
+          } else {
+            res.setHeader('Cache-Control', 'no-cache');
+          }
+        },
+      }));
       console.log('[info] serving web client from ' + candidate);
       break;
     }
@@ -156,21 +300,127 @@ async function boot() {
       'Deploy the full repository (with trycord-client/) or ignore this if API-only.');
   }
 
-  const { broadcast } = createGateway(server);
+  // Serve the public website (repo-root public/, optional). Plain editable
+  // HTML/CSS/JS under the same origin as the app, plus clean URLs for the main
+  // pages. Mounted AFTER the client so the app keeps the root and any shared
+  // asset names; the public/index.html landing is previewable at /welcome (an
+  // operator may also serve public/ from the domain root in front of a reverse
+  // proxy).
+  let publicDir = null;
+  for (const candidate of [
+    path.join(__dirname, '..', '..', 'public'),
+    path.join(__dirname, '..', 'public'),
+  ]) {
+    if (fs.existsSync(path.join(candidate, 'index.html'))) {
+      publicDir = candidate;
+      app.use(express.static(candidate, {
+        setHeaders(res) {
+          res.setHeader('Cache-Control', 'no-cache');
+        },
+      }));
+      break;
+    }
+  }
+  if (publicDir) {
+    const sendPublic = (res, name, status) => {
+      res.status(status || 200).set('Cache-Control', 'no-cache').sendFile(name, { root: publicDir }, (err) => {
+        if (err && !res.headersSent) {
+          res.status(500).json({ error: { code: 'INTERNAL', message: 'internal error' } });
+        }
+      });
+    };
+    // Map one public HTML file to one clean URL. Missing files fall back to the
+    // site's own 404 page instead of a bare Express "Cannot GET".
+    const publicPage = (name) => {
+      return (req, res) => {
+        const exists = fs.existsSync(path.join(publicDir, name));
+        sendPublic(res, exists ? name : '404.html', exists ? 200 : 404);
+      };
+    };
+    app.get('/terms', publicPage('terms.html'));
+    app.get('/privacy', publicPage('privacy.html'));
+    app.get('/about', publicPage('about.html'));
+    app.get('/contact', publicPage('contact.html'));
+    app.get('/features', publicPage('features.html'));
+    app.get('/docs', publicPage('documentation.html'));
+    app.get('/download', publicPage('download.html'));
+    app.get('/security', publicPage('security.html'));
+    app.get('/status', publicPage('status.html'));
+    app.get('/welcome', publicPage('index.html'));
+    app.get('/404', publicPage('404.html'));
+    console.log('[info] serving public website from ' + publicDir);
+  }
+
+  const { broadcast, broadcastDm, sendToUser, isOnline, getPresence, issueTicket, disconnectUser } = createGateway(server);
+  require('./routes/auth').setTicketIssuer(issueTicket);
   require('./routes/messages').setBroadcaster(broadcast);
+  require('./routes/dms').setGateway({ broadcastDm, sendToUser, isOnline });
+  require('./routes/friends').setGateway({ sendToUser });
+  require('./routes/users').setGateway({ getPresence });
+  require('./routes/admin').setGateway({ disconnectUser });
+
+  // Trust & Safety: bootstrap platform admins from ADMIN_USERNAMES before
+  // the server accepts traffic. Idempotent — re-runs promote any new names
+  // and leave existing admins untouched.
+  const bootstrapAdmins = (async () => {
+    const names = String(process.env.ADMIN_USERNAMES || '')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    if (!names.length) {
+      console.log('[info] ADMIN_USERNAMES not set — no platform admins bootstrapped');
+      return;
+    }
+    for (const username of names) {
+      const u = await db.get('SELECT * FROM users WHERE username = ?', [username]);
+      if (!u) { console.warn(`[warn] ADMIN_USERNAMES: no user "${username}" yet — promote by re-running with the account created`); continue; }
+      await enforcement.ensureAdminUser(u.id);
+      console.log(`[info] platform admin: ${username}`);
+    }
+  })();
+  await bootstrapAdmins;
+
+  // Public site 404 page for unknown non-API GETs (only when the public
+  // website is present). API paths keep their JSON error envelope below.
+  if (publicDir) {
+    app.use((req, res, next) => {
+      if (req.method !== 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/uploads') || req.path.startsWith('/ws')) {
+        return next();
+      }
+      res.status(404).set('Cache-Control', 'no-cache').sendFile('404.html', { root: publicDir }, (err) => {
+        if (err && !res.headersSent) next(err);
+      });
+    });
+  }
 
   // Consistent error envelope for anything that escapes routes.
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
+    const status = (err && (err.statusCode || err.status)) || 500;
+    // Client-side problems surface as proper 4xx (body-parser rejects with
+    // 413/400 for oversized or malformed JSON). Everything else stays a
+    // generic 500 — never stack traces, queries, or internals (§79).
+    if (status >= 400 && status < 500) {
+      const code = err && err.type === 'entity.too.large' ? 'PAYLOAD_TOO_LARGE'
+        : err && err.type === 'entity.parse.failed' ? 'BAD_JSON'
+        : 'BAD_REQUEST';
+      const message = status === 413 ? 'request body too large'
+        : status === 400 ? 'malformed request body'
+        : 'bad request';
+      console.warn('[warn] request rejected ' + status + ' (' + message + ')');
+      return res.status(status).json({ error: { code, message } });
+    }
     console.error('[error]', err && err.message ? err.message : err);
     res.status(500).json({ error: { code: 'INTERNAL', message: 'internal error' } });
   });
 
   // Drop expired token revocations (uses JS time — portable across databases).
+  const uploads = require('./services/uploads');
   const purge = async () => {
     try {
       await db.run('DELETE FROM revoked_tokens WHERE expires_at < ?', [new Date().toISOString()]);
+      await db.run('DELETE FROM password_resets WHERE expires_at < ? OR used_at IS NOT NULL', [new Date().toISOString()]);
+      await db.run('DELETE FROM email_verifications WHERE expires_at < ? OR used_at IS NOT NULL', [new Date().toISOString()]);
+      await uploads.purgePending();
     } catch { /* shutting down */ }
   };
   await purge();
@@ -180,7 +430,7 @@ async function boot() {
   await new Promise((resolve, reject) => {
     server.on('error', reject);
     server.listen(PORT, HOST, () => {
-      console.log(`.trycord server "${inst.instanceId}" listening on http://${HOST}:${PORT}`);
+      console.log(`Trycord server "${inst.instanceId}" listening on http://${HOST}:${PORT}`);
       if (inst.publicUrl) {
         console.log(`Web client available at ${inst.publicUrl}`);
       } else {
@@ -194,7 +444,28 @@ async function boot() {
 }
 
 if (require.main === module) {
-  boot().catch((e) => {
+  boot().then(({ server }) => {
+    // Graceful shutdown: stop accepting, let sockets drain, close the
+    // database, then exit. Never corrupt state on the way out.
+    let shuttingDown = false;
+    const shutdown = (signal) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log(`[info] ${signal}: draining connections…`);
+      server.close(() => {
+        db.close()
+          .catch(() => {})
+          .finally(() => {
+            console.log('[info] shutdown complete');
+            process.exit(0);
+          });
+      });
+      // Don't hang forever on stubborn keep-alives.
+      setTimeout(() => process.exit(0), 10000).unref();
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+  }).catch((e) => {
     console.error('startup failed: ' + (e.message || e));
     process.exit(1);
   });

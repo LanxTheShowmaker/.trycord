@@ -3,10 +3,30 @@
   "version": "0.1.0",
   "description": "Trycord chat server: REST API + realtime WebSocket gateway, serves the web client",
   "main": "src/server.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LanxTheShowmaker/.trycord.git",
+    "directory": "trycord-server"
+  },
+  "bugs": {
+    "url": "https://github.com/LanxTheShowmaker/.trycord/issues"
+  },
+  "homepage": "https://github.com/LanxTheShowmaker/.trycord#readme",
+  "keywords": [
+    "chat",
+    "self-hosted",
+    "websocket",
+    "community"
+  ],
+  "author": "Trycord",
   "scripts": {
     "start": "node src/server.js",
     "seed": "node scripts/seed.js",
-    "migrate": "node scripts/migrate.js"
+    "migrate": "node scripts/migrate.js",
+    "check": "node scripts/check.js",
+    "test:regression": "node scripts/test-regression.js",
+    "test:phase2": "node scripts/test-phase2.js",
+    "test:trustsafety": "node scripts/test-trustsafety.js"
   },
   "license": "MIT",
   "dependencies": {
@@ -16,7 +36,12 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.4.0",
     "mysql2": "^3.11.0",
+    "nodemailer": "^10.0.10",
     "ws": "^8.21.3"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
