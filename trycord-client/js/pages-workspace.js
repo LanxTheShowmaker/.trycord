@@ -1,1017 +1,845 @@
-/* Server workspace: server nav, header + tabs (Overview, Chat, Members,
-   Roles, Invites, Settings), member panel. Tabs gated by backend perms. */
-(function () {
-  var Ui = window.TrycordUi;
-  var C = window.TrycordComponents;
-  var chatSocket = null;
-  var renderedIds = {};
-  var current = { serverId: null, channelId: null };
-  var navData = { detail: null, cats: [], channels: [] };
+﻿// Server workspace: the main Environment when inside a community.
+//   /server/:id                 -> landing (channel list summary)
+//   /server/:id/channel/:cid    -> channel conversation
+//   /server/:id/channels/new    -> create channel
+//   /server/:id/invites         -> invite management
+//   /server/:id/settings        -> server settings (MANAGE_SERVER)
+// Plus friend-join flow for /invite/:code handled in router.
 
-  function closeChat() {
-    if (chatSocket) {
-      try { chatSocket.close(); } catch (e) { /* ignore */ }
-      chatSocket = null;
-    }
-    current.channelId = null;
-    renderedIds = {};
+import Api from './api.js';
+import State, {
+  enterServer, refreshServers, leaveServerContext, can, isAuthed, currentServerId, peerPresence,
+} from './state.js';
+import { esc, el, clear, toast, relTime, confirmDialog, openModal } from './ui.js';
+import { avatar, emptyState, messageRow, channelRow } from './components.js';
+import { renderContextHeader, renderAllChrome, renderCommunities, renderPlaceNavigation } from './shell.js';
+import Realtime from './realtime.js';
+
+let activeChannelId = null;
+
+function ensureServer(serverId) {
+  return enterServer(serverId).catch((ex) => {
+    throw ex;
+  });
+}
+
+async function renderServerLanding(container, serverId) {
+  clear(container);
+  let server;
+  try {
+    const { detail } = await ensureServer(serverId);
+    server = detail;
+  } catch (ex) {
+    renderContextHeader({ title: 'Unavailable' });
+    container.appendChild(el('div', { class: 'form-error' }, ex.message || 'Cannot open this server'));
+    return;
   }
-
-  function currentChannel() {
-    return current.channelId;
-  }
-
-  function can(perm) {
-    return TrycordState.can(current.serverId, perm);
-  }
-
-  async function copyText(text, okMsg) {
-    try {
-      await navigator.clipboard.writeText(text);
-      Ui.toast(okMsg || 'Copied.', 'good');
-    } catch (e) {
-      Ui.toast(text, 'info');
-    }
-  }
-
-  async function workspace(root, serverId, tab, deepChannelId) {
-    tab = tab || 'overview';
-    var detail;
-    try {
-      detail = await TrycordApi.serverDetail(serverId);
-    } catch (e) {
-      if (e.code === 'NOT_A_MEMBER') {
-        C.setTopbar('Server', 'You are not a member.');
-        renderNotMember(root, serverId);
-        return;
-      }
-      root.innerHTML = '<div class="inline-err" role="alert"><h3>Couldn’t load this server</h3>' +
-        '<p>' + Ui.esc(Ui.friendlyError(e, 'server')) + '</p>' +
-        '<button type="button" class="btn btn-sm" id="ws-retry">Retry</button> ' +
-        '<a class="btn btn-sm btn-ghost" href="#/servers">Your servers</a></div>';
-      document.getElementById('ws-retry').onclick = () => workspace(root, serverId, tab, deepChannelId);
-      return;
-    }
-    TrycordState.touchRecent(detail.id);
-    TrycordState.setPerms(detail.id, { is_owner: detail.is_owner, permissions: detail.permissions || [] });
-    current.serverId = detail.id;
-    navData.detail = detail;
-
-    var tabs = ['overview', 'chat', 'members'];
-    if (can('MANAGE_ROLES')) tabs.push('roles');
-    if (can('MANAGE_INVITES')) tabs.push('invites');
-    if (can('MANAGE_SERVER')) tabs.push('settings');
-    if (tabs.indexOf(tab) === -1) {
-      location.hash = '#/server/' + encodeURIComponent(detail.id) + '/overview';
-      return;
-    }
-
-    C.setTopbar(detail.name, 'Server workspace', '');
-    paintServerNav();
-    paintMemberPanel(detail);
-
-    var isFav = TrycordState.isFav(detail.id);
-    var vis = detail.is_public
-      ? (detail.is_discoverable ? Ui.badge('Public', 'pub') : Ui.badge('Unlisted', ''))
-      : Ui.badge('Private', 'priv');
-    root.innerHTML =
-      '<section class="ws-head">' + Ui.avatarHtml(detail.name, 'lg') +
-      '<div class="titles"><h2>' + Ui.esc(detail.name) + '</h2>' +
-      '<p class="desc">' + Ui.esc(detail.description || 'No description.') + '</p>' +
-      '<div class="meta row wrap" style="margin-top:0.4rem">' +
-      (detail.is_owner ? Ui.badge('Owner', 'owner') : Ui.badge('Member', '')) + vis +
-      Ui.badge(detail.member_count + ' member' + (detail.member_count === 1 ? '' : 's'), '') +
-      '</div></div>' +
-      '<div class="side">' +
-      '<span class="code-chip" title="Legacy join code">⌁ ' + Ui.esc(detail.join_code) +
-      ' <button type="button" class="btn btn-ghost btn-sm" id="copy-code">Copy</button></span>' +
-      '<button type="button" class="icon-btn fav-btn" data-fav="' + Ui.esc(detail.id) + '" ' +
-      'aria-pressed="' + (isFav ? 'true' : 'false') + '" title="Toggle favorite" aria-label="Toggle favorite">' +
-      Ui.icon('star') + '</button>' +
-      '</div></section>' +
-      '<div class="tabs" role="tablist" aria-label="Server sections">' +
-      tabs.map((t) =>
-        '<button type="button" role="tab" class="tab" data-tab="' + t + '" aria-selected="' + (t === tab ? 'true' : 'false') + '">' +
-        t[0].toUpperCase() + t.slice(1) + '</button>').join('') +
-      '</div>' +
-      '<div id="ws-body"></div>';
-
-    C.wireCards(root);
-    document.getElementById('copy-code').onclick = () => copyText(detail.join_code, 'Join code copied.');
-    root.querySelectorAll('[data-tab]').forEach((b) => {
-      b.onclick = () => {
-        location.hash = '#/server/' + encodeURIComponent(detail.id) + '/' + b.dataset.tab;
-      };
-    });
-
-    var body = document.getElementById('ws-body');
-    if (tab === 'overview') await renderOverview(body, detail);
-    else if (tab === 'chat') await renderChat(body, detail, deepChannelId);
-    else if (tab === 'members') await renderMembers(body, detail);
-    else if (tab === 'roles') await renderRoles(body, detail);
-    else if (tab === 'invites') await renderInvites(body, detail);
-    else if (tab === 'settings') renderSettings(body, detail);
-  }
-
-  // --- server navigation column ----------------------------------------------
-  async function paintServerNav() {
-    var host = document.getElementById('server-nav-body');
-    var d = navData.detail;
-    if (!host || !d) return;
-    var chans = navData.channels;
-    if (!chans.length) {
-      try {
-        var data = await TrycordApi.channels(d.id);
-        navData.cats = data.categories || [];
-        navData.channels = data.channels || [];
-        chans = navData.channels;
-        Trycord.noteChannels(d.id, chans);
-      } catch (e) { /* show header only */ }
-    }
-    var cats = navData.cats;
-    var html =
-      '<div class="srv-head">' + Ui.avatarHtml(d.name) +
-      '<div class="titles"><h2>' + Ui.esc(d.name) + '</h2>' +
-      '<div class="sub">' + d.member_count + ' members</div></div>' +
-      '<button type="button" class="icon-btn srv-menu-btn" id="srv-menu" aria-label="Server menu" aria-haspopup="menu">' + Ui.icon('dots') + '</button></div>';
-    if (can('MANAGE_INVITES')) {
-      html += '<div class="srv-actions"><button type="button" class="btn btn-sm btn-block" id="srv-invite">' + Ui.icon('mail') + ' Invite</button></div>';
-    }
-    html += '<div id="srv-channels"></div>';
-    host.innerHTML = html;
-
-    document.getElementById('srv-menu').onclick = (e) => C.serverMenu(e.currentTarget, d.id);
-    var invBtn = document.getElementById('srv-invite');
-    if (invBtn) {
-      invBtn.onclick = async () => {
-        try {
-          var inv = await TrycordApi.createInvite(d.id, { expiresInHours: 24 });
-          copyText(inv.code, 'Invite copied (expires in 24h).');
-        } catch (e) { Ui.toast(Ui.friendlyError(e), 'bad'); }
-      };
-    }
-    paintChannelList();
-  }
-
-  function paintChannelList() {
-    var host = document.getElementById('srv-channels');
-    if (!host) return;
-    var d = navData.detail;
-    var cats = navData.cats;
-    var chans = navData.channels;
-    host.innerHTML = '';
-    function row(c) {
-      var r = document.createElement('div');
-      r.className = 'chan-row';
-      var unread = TrycordState.channelUnread(c.id);
-      var b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'chan-btn' + (c.id === current.channelId ? ' active' : '') +
-        (TrycordState.isMutedChannel(c.id) ? ' dim' : '');
-      b.innerHTML = Ui.icon('hash') + '<span class="lbl"></span>' +
-        (unread ? '<span class="chan-unread" aria-hidden="true"></span>' : '');
-      b.querySelector('.lbl').textContent = c.name;
-      b.title = '#' + c.name + (c.topic ? ' — ' + c.topic : '');
-      b.setAttribute('aria-label', 'Open channel ' + c.name + (unread ? ' (unread)' : ''));
-      if (c.id === current.channelId) b.setAttribute('aria-current', 'page');
-      b.onclick = () => {
-        document.body.classList.remove('nav-open');
-        location.hash = '#/server/' + encodeURIComponent(d.id) + '/chat/' + encodeURIComponent(c.id);
-      };
-      b.oncontextmenu = (e) => {
-        e.preventDefault();
-        C.channelMenu(b, {
-          serverId: d.id, channelId: c.id, name: c.name,
-          canManage: can('MANAGE_CHANNELS'),
-          onChanged: () => { paintChannelList(); Trycord.paintUnread(); },
+  renderContextHeader({ title: server.name, sub: (server.description || 'Community') + ' · ' + (server.member_count || 0) + ' members' });
+  const wrap = el('div', { class: 'page atrium' });
+  wrap.appendChild(el('h2', {}, 'Channels'));
+  const layout = State.channels;
+  const categories = layout.categories || [];
+  const channels = layout.channels || [];
+  if (!channels.length) {
+    wrap.appendChild(emptyState('◌', 'No channels yet', 'Create a channel to get started.'));
+  } else {
+    for (const cat of categories) {
+      const inCat = channels.filter((ch) => String(ch.category_id) === String(cat.id));
+      if (!inCat.length) continue;
+      wrap.appendChild(el('div', { class: 'section-label' }, cat.name));
+      for (const ch of inCat) {
+        const r = el('button', {
+          class: 'channel-row', type: 'button', style: { marginLeft: 0, width: '100%' },
+          onClick: () => { location.hash = '#/server/' + serverId + '/channel/' + ch.id; },
         });
-      };
-      r.appendChild(b);
-      return r;
-    }
-    cats.forEach((cat) => {
-      var inCat = chans.filter((c) => c.category_id === cat.id);
-      if (!inCat.length) return;
-      var wrap = document.createElement('div');
-      wrap.className = 'cat-block';
-      var closed = TrycordState.isCollapsed(d.id, cat.id);
-      var head = document.createElement('button');
-      head.type = 'button';
-      head.className = 'cat-head' + (closed ? ' closed' : '');
-      head.setAttribute('aria-expanded', closed ? 'false' : 'true');
-      head.innerHTML = Ui.icon('chev') + '<span class="grow"></span>';
-      head.querySelector('.grow').textContent = cat.name;
-      head.onclick = () => {
-        TrycordState.setCollapsed(d.id, cat.id, !TrycordState.isCollapsed(d.id, cat.id));
-        paintChannelList();
-      };
-      head.oncontextmenu = (e) => {
-        if (!can('MANAGE_CHANNELS')) return;
-        e.preventDefault();
-        Ui.menu(head, [
-          {
-            icon: 'trash', label: 'Delete category', danger: true,
-            action: async () => {
-              try {
-                await TrycordApi.deleteCategory(d.id, cat.id);
-                var data = await TrycordApi.channels(d.id);
-                navData.cats = data.categories || [];
-                navData.channels = data.channels || [];
-                paintChannelList();
-                Ui.toast('Category deleted (channels kept).', 'good');
-              } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-            },
-          },
-        ], { label: cat.name });
-      };
-      wrap.appendChild(head);
-      if (!closed) inCat.forEach((c) => wrap.appendChild(row(c)));
-      host.appendChild(wrap);
-    });
-    var uncat = chans.filter((c) => !c.category_id);
-    if (uncat.length) {
-      if (cats.length) {
-        var lbl = document.createElement('div');
-        lbl.className = 'cat-block';
-        lbl.innerHTML = '<span class="cat-head" aria-hidden="true">No category</span>';
-        host.appendChild(lbl);
-      }
-      uncat.forEach((c) => host.appendChild(row(c)));
-    }
-    if (!chans.length) host.innerHTML = '<p class="muted small">No channels yet.</p>';
-  }
-
-  function paintUnread() {
-    paintChannelList();
-  }
-
-  // --- member / info panel ------------------------------------------------------
-  async function paintMemberPanel(detail, members) {
-    var panel = document.getElementById('member-panel');
-    var body = document.getElementById('member-panel-body');
-    if (!panel || !body) return;
-    panel.hidden = !TrycordState.ui.memberPanel;
-    document.getElementById('panel-toggle').setAttribute('aria-expanded',
-      TrycordState.ui.memberPanel ? 'true' : 'false');
-    if (panel.hidden) return;
-    if (!members) {
-      try {
-        members = await TrycordApi.serverMembers(detail.id);
-      } catch (e) {
-        body.innerHTML = '<h2 class="small muted">Members</h2><p class="muted small">Couldn’t load members.</p>';
-        return;
+        r.appendChild(el('span', { class: 'ch-prefix' }, '#'));
+        r.appendChild(el('span', { class: 'ch-name' }, ch.name));
+        if (ch.topic) r.appendChild(el('span', { class: 'row-sub' }, esc(ch.topic)));
+        wrap.appendChild(r);
       }
     }
-    body.innerHTML =
-      '<h2 style="font-size:0.95rem">Members · ' + members.length + '</h2>' +
-      '<ul class="member-list">' + members.map((m) =>
-        '<li class="member-item">' + Ui.avatarHtml(m.display_name || m.username, 'sm') +
-        '<span class="who"><strong>' + Ui.esc(m.display_name || m.username) + '</strong>' +
-        '<small>@' + Ui.esc(m.username) + '</small></span>' +
-        (m.is_owner ? Ui.badge('Owner', 'owner') : '') + '</li>').join('') + '</ul>' +
-      '<hr class="divider" /><h2 style="font-size:0.95rem">About</h2>' +
-      '<p class="small muted">' + Ui.esc(detail.description || 'No description.') + '</p>' +
-      '<p class="small muted">Created ' + Ui.fullDate(detail.created_at) + '<br>Owner: ' +
-      Ui.esc(detail.owner_display || detail.owner_name || '—') + '</p>';
-  }
-
-  // --- not a member: join prompt, not a dead end ---------------------------
-  async function renderNotMember(root, serverId) {
-    root.innerHTML = '<div id="nm-body">' + Ui.skeletons(2) + '</div>';
-    var body = document.getElementById('nm-body');
-    var preview = null;
-    try {
-      preview = await TrycordApi.discoverPreview(serverId);
-    } catch (e) { /* private or gone */ }
-    if (!preview) {
-      body.innerHTML = Ui.emptyState({
-        icon: '◌', title: 'Server unavailable',
-        hint: 'It may be private, unlisted, or deleted. Ask a member for an invite.',
-        actions: '<a class="btn btn-ghost btn-sm" href="#/servers">Your servers</a>' +
-          '<a class="btn btn-ghost btn-sm" href="#/discover">Discover</a>',
-      });
-      return;
-    }
-    body.innerHTML =
-      '<div class="state"><div class="glyph" aria-hidden="true">◌</div>' +
-      '<h3>You’re not a member of ' + Ui.esc(preview.name) + '</h3>' +
-      '<p>' + Ui.esc(preview.description || 'No description.') + '<br>' +
-      '<span class="muted">' + preview.member_count + ' members · ' + preview.channel_count + ' channels</span></p>' +
-      '<div class="actions"><button type="button" class="btn btn-primary" id="nm-join">Join server</button>' +
-      '<a class="btn btn-ghost" href="#/discover/' + Ui.esc(preview.id) + '">Full preview</a></div></div>';
-    document.getElementById('nm-join').onclick = async (e) => {
-      var btn = e.currentTarget;
-      Ui.setLoading(btn, true, 'Joining…');
-      try {
-        await TrycordApi.joinPublic(preview.id);
-        await Trycord.refreshServers();
-        Ui.toast('Joined ' + preview.name + '.', 'good');
-        location.hash = '#/server/' + encodeURIComponent(preview.id) + '/overview';
-        workspace(root, preview.id, 'overview');
-      } catch (err) {
-        Ui.setLoading(btn, false);
-        Ui.toast(Ui.friendlyError(err), 'bad');
-      }
-    };
-  }
-
-  // --- overview -----------------------------------------------------------
-  async function renderOverview(body, detail) {
-    var canInvite = can('MANAGE_INVITES');
-    body.innerHTML =
-      '<div class="stats">' +
-      '<div class="stat"><div class="num">' + detail.member_count + '</div><div class="lbl">Members</div></div>' +
-      '<div class="stat"><div class="num">' + detail.channel_count + '</div><div class="lbl">Channels</div></div>' +
-      '<div class="stat"><div class="num">' + detail.message_count + '</div><div class="lbl">Messages</div></div>' +
-      '<div class="stat"><div class="num">' + Ui.timeAgo(detail.created_at) + '</div><div class="lbl">Created</div></div>' +
-      '</div>' +
-      '<div class="toolbar">' +
-      '<a class="btn btn-primary btn-sm" href="#/server/' + encodeURIComponent(detail.id) + '/chat">Open chat</a>' +
-      (canInvite ? '<button type="button" class="btn btn-ghost btn-sm" id="ov-invite">Copy 24h invite</button>' : '') +
-      (can('MANAGE_SERVER')
-        ? '<a class="btn btn-ghost btn-sm" href="#/server/' + encodeURIComponent(detail.id) + '/settings">Server settings</a>'
-        : '<a class="btn btn-ghost btn-sm" href="#/server/' + encodeURIComponent(detail.id) + '/members">View members</a>') +
-      '</div>' +
-      '<section class="section"><h2>Recent activity</h2><div id="ws-activity">' + Ui.skeletons(3) + '</div></section>';
-
-    var invBtn = document.getElementById('ov-invite');
-    if (invBtn) {
-      invBtn.onclick = async () => {
-        try {
-          var inv = await TrycordApi.createInvite(detail.id, { expiresInHours: 24 });
-          copyText(inv.code, 'Invite copied (expires in 24h).');
-        } catch (e) { Ui.toast(Ui.friendlyError(e), 'bad'); }
-      };
-    }
-
-    try {
-      var acts = (await TrycordApi.activity(30)).filter((a) => a.server_id === detail.id).slice(0, 5);
-      var box = document.getElementById('ws-activity');
-      if (!box) return;
-      box.innerHTML = acts.length
-        ? '<div class="activity-list">' + acts.map(TrycordPagesHome.activityItem).join('') + '</div>'
-        : Ui.emptyState({ icon: '◷', title: 'No activity yet', hint: 'Be the first to post in chat.' });
-      box.querySelectorAll('[data-goto-server]').forEach((b) => {
-        b.onclick = () => {
-          location.hash = '#/server/' + encodeURIComponent(b.dataset.gotoServer) +
-            '/chat/' + encodeURIComponent(b.dataset.gotoChannel);
-        };
-      });
-    } catch (e) {
-      var box2 = document.getElementById('ws-activity');
-      if (box2) box2.innerHTML = Ui.errorState(Ui.friendlyError(e, 'messages'));
-    }
-  }
-
-  // --- chat ---------------------------------------------------------------
-  async function renderChat(body, detail, deepChannelId) {
-    var manageChannels = can('MANAGE_CHANNELS');
-    body.innerHTML =
-      '<div class="chat-grid"><div class="chat-pane">' +
-      '<div class="chat-topic"><span class="grow" id="ch-topic">Select a channel</span>' +
-      '<button type="button" class="icon-btn" id="ch-filter-btn" title="Filter loaded messages" aria-label="Filter loaded messages" aria-expanded="false">' + Ui.icon('search') + '</button>' +
-      '<button type="button" class="icon-btn" id="ch-mute-btn" title="Mute channel" aria-label="Mute channel" aria-pressed="false">' + Ui.icon('bell') + '</button></div>' +
-      '<div class="msg-filter" id="msg-filter" hidden><input type="text" id="msg-filter-input" placeholder="Filter messages…" aria-label="Filter messages" /></div>' +
-      '<ul class="msg-list" id="msg-list" aria-live="polite" aria-label="Messages"></ul>' +
-      '<form class="composer" id="composer"><textarea id="msg-input" rows="1" maxlength="2000" placeholder="Message…" aria-label="Message"></textarea>' +
-      '<button class="btn btn-primary send" id="send-btn" type="submit" aria-label="Send message" disabled>' + Ui.icon('send') + '</button></form>' +
-      '<div class="composer-foot"><span>Enter to send · Shift+Enter for newline</span><span id="char-count">0 / 2000</span></div>' +
-      (manageChannels ? '<form id="ch-new" class="toolbar" style="padding:0 1rem 0.8rem;margin:0">' +
-        '<input type="text" id="ch-name" class="grow" placeholder="new-channel name" maxlength="32" aria-label="New channel name" />' +
-        '<select id="ch-cat" aria-label="Category"></select>' +
-        '<button class="btn btn-sm" type="submit">Add</button></form>' : '') +
-      '</div></div>';
-
-    var list = [];
-    try {
-      var data = await TrycordApi.channels(detail.id);
-      navData.cats = data.categories || [];
-      navData.channels = data.channels || [];
-      list = navData.channels;
-      Trycord.noteChannels(detail.id, list);
-    } catch (e) {
-      document.getElementById('msg-list').innerHTML = '<li>' + Ui.errorState(Ui.friendlyError(e, 'messages')) + '</li>';
-      return;
-    }
-    paintServerNav();
-    var canModMsg = can('MANAGE_MESSAGES');
-    var me = TrycordState.user;
-    var filter = '';
-
-    var catSelect = document.getElementById('ch-cat');
-    if (catSelect) {
-      catSelect.innerHTML = '<option value="">No category</option>' +
-        navData.cats.map((c) => '<option value="' + Ui.esc(c.id) + '">' + Ui.esc(c.name) + '</option>').join('');
-    }
-
-    var filterBtn = document.getElementById('ch-filter-btn');
-    var filterBox = document.getElementById('msg-filter');
-    var filterInput = document.getElementById('msg-filter-input');
-    filterBtn.onclick = () => {
-      var open = filterBox.hidden;
-      filterBox.hidden = !open;
-      filterBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-      if (open) filterInput.focus();
-      else { filter = ''; filterInput.value = ''; applyFilter(); }
-    };
-    filterInput.addEventListener('input', () => { filter = filterInput.value.toLowerCase(); applyFilter(); });
-    function applyFilter() {
-      document.querySelectorAll('#msg-list .msg').forEach((li) => {
-        var t = li.querySelector('.text');
-        li.style.display = !filter || (t && t.textContent.toLowerCase().includes(filter)) ? '' : 'none';
-      });
-    }
-
-    var muteBtn = document.getElementById('ch-mute-btn');
-    function paintMute() {
-      var muted = current.channelId && TrycordState.isMutedChannel(current.channelId);
-      muteBtn.innerHTML = Ui.icon(muted ? 'bell-off' : 'bell');
-      muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');
-      muteBtn.title = muted ? 'Unmute channel' : 'Mute channel';
-    }
-    muteBtn.onclick = () => {
-      if (!current.channelId) return;
-      TrycordState.toggleMuteChannel(current.channelId);
-      paintMute();
-      paintServerNav();
-    };
-    paintMute();
-
-    async function selectChannel(id) {
-      var ch = list.find((x) => x.id === id) || list[0];
-      if (!ch) {
-        document.getElementById('msg-input').disabled = true;
-        document.getElementById('send-btn').disabled = true;
-        document.getElementById('msg-list').innerHTML = '<li class="muted" style="padding:1rem">No channels yet.' +
-          (manageChannels ? ' Create one below.' : '') + '</li>';
-        return;
-      }
-      current.channelId = ch.id;
-      TrycordState.setLastChannel(detail.id, ch.id);
-      renderedIds = {};
-      lastRendered = null;
-      paintServerNav();
-      paintMute();
-      document.getElementById('ch-topic').textContent = '#' + ch.name + (ch.topic ? ' — ' + ch.topic : '');
-      var ml = document.getElementById('msg-list');
-      ml.innerHTML = Ui.skeletons(3);
-      try {
-        var msgs = await TrycordApi.messages(ch.id, 50);
-        ml.innerHTML = '';
-        if (!msgs.length) {
-          ml.innerHTML = '<li><div class="state"><div class="glyph" aria-hidden="true">#</div>' +
-            '<h3>No messages yet</h3><p>Start the conversation below.</p></div></li>';
-        }
-        msgs.forEach((m) => {
-          TrycordState.touchChannel(ch.id, m.created_at);
-          addMsg(m);
+    const ungrouped = channels.filter((ch) => !ch.category_id);
+    if (ungrouped.length) {
+      for (const ch of ungrouped) {
+        const r = el('button', {
+          class: 'channel-row', type: 'button', style: { marginLeft: 0, width: '100%' },
+          onClick: () => { location.hash = '#/server/' + serverId + '/channel/' + ch.id; },
         });
-        var latest = msgs.length ? msgs[msgs.length - 1].created_at : null;
-        TrycordState.markRead(ch.id, latest);
-        Trycord.paintUnread();
-      } catch (e) {
-        ml.innerHTML = '<li>' + Ui.errorState(Ui.friendlyError(e, 'messages')) + '</li>';
+        r.appendChild(el('span', { class: 'ch-prefix' }, '#'));
+        r.appendChild(el('span', { class: 'ch-name' }, ch.name));
+        wrap.appendChild(r);
       }
-      applyFilter();
-      if (chatSocket && chatSocket.readyState === WebSocket.OPEN) {
-        chatSocket.send(JSON.stringify({ type: 'join', channelId: ch.id }));
-      }
-      history.replaceState(null, '', '#/server/' + encodeURIComponent(detail.id) + '/chat/' + encodeURIComponent(ch.id));
     }
+  }
+  wrap.appendChild(el('div', { class: 'section-label' }, 'Members'));
+  renderMemberList(wrap, serverId);
+  container.appendChild(wrap);
+  renderAllChrome();
+}
 
-    function sameGroup(a, b) {
-      if (!a || !b || a.author_id !== b.author_id) return false;
-      return Math.abs(new Date(a.created_at) - new Date(b.created_at)) < 5 * 60 * 1000;
+// Community member list with per-community nicknames. Re-renderable in place
+// so a nickname change in the modal updates this section without a reroute.
+function renderMemberList(wrap, serverId) {
+  const old = wrap.querySelector('.member-list');
+  if (old) old.remove();
+  const listBox = el('div', { class: 'member-list' });
+  const canNickname = can('KICK_MEMBERS') || can('*');
+  for (const m of (State.members || []).slice(0, 24)) {
+    const row = el('div', { class: 'row' });
+    const rid = m.user_id || m.id;
+    const avatarEl = avatar({ id: rid, username: m.username, displayName: m.display_name, avatarUrl: m.avatar_url }, { withPresence: true });
+    avatarEl.style.cursor = 'pointer';
+    avatarEl.addEventListener('click', () => { location.hash = '#/users/' + rid; });
+    row.appendChild(avatarEl);
+    const mm = el('div', { class: 'row-main' });
+    const nameEl = el('div', { class: 'row-title', style: { cursor: 'pointer' } }, m.nickname || m.display_name || m.username);
+    nameEl.addEventListener('click', () => { location.hash = '#/users/' + rid; });
+    mm.appendChild(nameEl);
+    const sub = m.nickname
+      ? '@' + (m.username || '') + (m.display_name && m.display_name !== m.username ? ' · ' + m.display_name : '')
+      : '@' + (m.username || '');
+    mm.appendChild(el('div', { class: 'row-sub' }, sub));
+    row.appendChild(mm);
+    const mine = State.me && String(rid) === String(State.me.id);
+    if (mine || canNickname) {
+      const nick = el('button', { class: 'btn sm', type: 'button', title: 'Set nickname' }, 'nick');
+      nick.addEventListener('click', () => openNicknameModal(serverId, m, wrap));
+      row.appendChild(nick);
     }
+    listBox.appendChild(row);
+  }
+  wrap.appendChild(listBox);
+}
 
-    function addMsg(m, prev) {
-      if (!m || renderedIds[m.id]) return;
-      renderedIds[m.id] = true;
-      var grouped = sameGroup(prev, m);
-      var li = document.createElement('li');
-      li.className = 'msg' + (grouped ? ' grouped' : '');
-      li.dataset.mid = m.id;
-      var day = Ui.dayLabel(m.created_at);
-      var prevDay = prev ? Ui.dayLabel(prev.created_at) : null;
-      var html = '';
-      if (day && day !== prevDay) html += '<div class="day-sep">' + Ui.esc(day) + '</div>';
-      li.innerHTML = html +
-        '<span class="m-av">' + Ui.avatarHtml(m.user || m.author_name || '?', 'sm') + '</span>' +
-        '<div class="body"><div class="meta"><b></b><time></time><span class="time-inline"></span></div>' +
-        '<div class="text"></div></div>' +
-        '<span class="acts"><button type="button" class="icon-btn" data-act="copy" title="Copy message" aria-label="Copy message">' + Ui.icon('copy') + '</button>' +
-        (((me && m.author_id === me.id) || canModMsg)
-          ? '<button type="button" class="icon-btn" data-act="del" title="Delete message" aria-label="Delete message">' + Ui.icon('trash') + '</button>'
-          : '') + '</span>';
-      li.querySelector('b').textContent = m.user || m.author_name || 'user';
-      var when = m.created_at ? new Date(m.created_at) : null;
-      li.querySelector('time').textContent = when && !isNaN(when) ? when.toLocaleString() : '';
-      li.querySelector('.time-inline').textContent = when && !isNaN(when)
-        ? when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
-      li.querySelector('.text').textContent = m.content || '';
-      li.querySelector('[data-act="copy"]').onclick = () => copyText(m.content || '', 'Message copied.');
-      var del = li.querySelector('[data-act="del"]');
-      if (del) {
-        del.onclick = async () => {
-          try {
-            await TrycordApi.deleteMessage(current.channelId, m.id);
-            delete renderedIds[m.id];
-            li.remove();
-          } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-        };
-      }
-      document.getElementById('msg-list').appendChild(li);
-      li.scrollIntoView({ block: 'nearest' });
-      return m;
-    }
+function openNicknameModal(serverId, member, wrap) {
+  const name = member.nickname || member.display_name || member.username;
+  const input = el('input', { class: 'input', type: 'text', maxlength: 32, placeholder: 'Nickname (2-32 chars)', value: name });
+  const err = el('div', { class: 'form-error', hidden: true });
+  const save = el('button', { class: 'btn primary', type: 'button' }, 'Save');
+  const clearBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Clear');
+  const modal = openModal({
+    title: 'Nickname',
+    body: el('div', {}, err,
+      el('p', { class: 'muted small' }, 'Set how @' + (member.username || '') + ' appears in this community. Empty clears it.'),
+      input),
+    footer: [clearBtn, save],
+  });
+  const saveIt = async () => {
+    err.hidden = true;
+    try {
+      const res = await Api.setNickname(serverId, member.user_id || member.id, input.value.trim());
+      toast(res && res.nickname ? 'Nickname saved.' : 'Nickname cleared.', 'ok');
+      modal.close();
+      await enterServer(serverId).catch(() => {});
+      if (wrap) renderMemberList(wrap, serverId);
+    } catch (ex) { err.hidden = false; err.textContent = ex.message || 'Failed'; }
+  };
+  save.addEventListener('click', saveIt);
+  clearBtn.addEventListener('click', async () => {
+    err.hidden = true;
+    try {
+      await Api.setNickname(serverId, member.user_id || member.id, '');
+      toast('Nickname cleared.', 'ok');
+      modal.close();
+      await enterServer(serverId).catch(() => {});
+      if (wrap) renderMemberList(wrap, serverId);
+    } catch (ex) { err.hidden = false; err.textContent = ex.message || 'Failed'; }
+  });
+}
 
-    // Grouping needs the previous message: reload path tracks it.
-    var lastRendered = null;
-    var origAdd = addMsg;
-    addMsg = function (m) {
-      var out = origAdd(m, lastRendered);
-      if (out) lastRendered = out;
-      return out;
-    };
-
-    var input = document.getElementById('msg-input');
-    var sendBtn = document.getElementById('send-btn');
-    var count = document.getElementById('char-count');
-    function autosize() {
-      input.style.height = 'auto';
-      input.style.height = Math.min(144, input.scrollHeight) + 'px';
-      var empty = !input.value.trim();
-      sendBtn.disabled = empty || !current.channelId;
-      count.textContent = input.value.length + ' / 2000';
-    }
-    input.addEventListener('input', autosize);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        document.getElementById('composer').requestSubmit();
-      }
-    });
-    autosize();
-
-    var newForm = document.getElementById('ch-new');
-    if (newForm) {
-      newForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        var nameInput = document.getElementById('ch-name');
-        var name = nameInput.value.trim();
-        if (!name) return;
-        try {
-          var r = await TrycordApi.createChannel(detail.id, {
-            name, categoryId: document.getElementById('ch-cat').value || undefined,
-          });
-          var data2 = await TrycordApi.channels(detail.id);
-          navData.cats = data2.categories || [];
-          navData.channels = data2.channels || [];
-          list = navData.channels;
-          Trycord.noteChannels(detail.id, list);
-          nameInput.value = '';
-          paintServerNav();
-          selectChannel(r.id || r.channelId);
-          Ui.toast('Channel created.', 'good');
-        } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-      });
-    }
-
-    document.getElementById('composer').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      var content = input.value.trim();
-      if (!content || !current.channelId) return;
-      input.value = '';
-      autosize();
-      try {
-        var m = await TrycordApi.postMessage(current.channelId, content);
-        TrycordState.touchChannel(current.channelId, m.created_at);
-        TrycordState.markRead(current.channelId, m.created_at);
-        addMsg(m);
-        Trycord.paintUnread();
-      } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-    });
-
-    var start = list.find((x) => x.id === deepChannelId) ? deepChannelId
-      : (TrycordState.getLastChannel(detail.id) && list.find((x) => x.id === TrycordState.getLastChannel(detail.id))
-        ? TrycordState.getLastChannel(detail.id)
-        : (list[0] && list[0].id));
-    if (start) {
-      selectChannel(start);
-      chatSocket = new WebSocket(TrycordApi.wsUrl());
-      chatSocket.onopen = () => {
-        if (current.channelId) chatSocket.send(JSON.stringify({ type: 'join', channelId: current.channelId }));
-      };
-      chatSocket.onmessage = (ev) => {
-        try {
-          var data = JSON.parse(ev.data);
-          if (data.type === 'message') {
-            TrycordState.touchChannel(data.channel_id, data.created_at);
-            if (data.channel_id === current.channelId) {
-              addMsg(data);
-              TrycordState.markRead(data.channel_id, data.created_at);
-            } else {
-              Trycord.notifyMessage(data);
-            }
-            Trycord.paintUnread();
-          } else if (data.type === 'message_deleted' && data.channel_id === current.channelId) {
-            delete renderedIds[data.id];
-            var el = document.querySelector('[data-mid="' + data.id + '"]');
-            if (el) el.remove();
-          }
-        } catch (err) { /* ignore */ }
-      };
+async function renderChannel(container, serverId, channelId) {
+  clear(container);
+  let server;
+  try {
+    if (String(State.lastServerId) !== String(serverId)) {
+      const { detail } = await ensureServer(serverId);
+      server = detail;
+    } else if (State.serverDetail) {
+      server = State.serverDetail;
     } else {
-      selectChannel(null);
+      const { detail } = await ensureServer(serverId);
+      server = detail;
     }
+  } catch (ex) {
+    renderContextHeader({ title: 'Unavailable' });
+    container.appendChild(el('div', { class: 'form-error' }, ex.message || 'Cannot open this server'));
+    return;
   }
 
-  // --- members ------------------------------------------------------------
-  async function renderMembers(body, detail) {
-    var manageRoles = can('MANAGE_ROLES');
-    var kickPerm = can('KICK_MEMBERS');
-    body.innerHTML = '<div id="mem-list">' + Ui.skeletons(4) + '</div>';
-    var box = document.getElementById('mem-list');
-    var members;
-    try {
-      members = await TrycordApi.serverMembers(detail.id);
-    } catch (e) {
-      box.innerHTML = Ui.errorState(Ui.friendlyError(e));
-      var rb = box.querySelector('[data-retry]');
-      if (rb) rb.onclick = () => renderMembers(body, detail);
+  const layout = State.channels;
+  const channel = (layout.channels || []).find((c) => String(c.id) === String(channelId));
+  const chanName = channel ? channel.name : 'channel';
+  renderContextHeader({ title: '#' + chanName, sub: (channel && channel.topic) ? esc(channel.topic) : server.name, icon: '#' });
+
+  const conv = el('div', { class: 'conversation' });
+  const thread = el('div', { class: 'thread' });
+  const feed = el('div', { class: 'feed' });
+  thread.appendChild(feed);
+  conv.appendChild(thread);
+
+  // ---- history ----
+  async function loadOlder(anchor) {
+    let msgs = [];
+    try { msgs = await Api.messages(channelId, { before: anchor, limit: 50 }); } catch { /* offline */ }
+    if (!msgs.length) return;
+    const frag = document.createDocumentFragment();
+    for (const m of msgs) frag.appendChild(buildMsg(m));
+    thread.insertBefore(thread.firstChild || feed, feed);
+    // prepend in order
+    while (frag.firstChild) feed.insertBefore(frag.firstChild, feed.firstChild);
+  }
+
+  async function reload() {
+    clear(feed);
+    let msgs = [];
+    try { msgs = await Api.messages(channelId, { limit: 50 }); } catch (ex) {
+      feed.appendChild(el('div', { class: 'form-error' }, ex.message || 'Cannot load messages'));
       return;
     }
-    paintMemberPanel(detail, members);
-    var me = TrycordState.user;
-    box.innerHTML = '<p class="muted">' + members.length + ' member' + (members.length === 1 ? '' : 's') + '</p>' +
-      '<ul class="member-list">' + members.map((m, i) =>
-        '<li class="member-item" data-uid="' + Ui.esc(m.id) + '">' +
-        Ui.avatarHtml(m.display_name || m.username) +
-        '<span class="who"><strong>' + Ui.esc(m.display_name || m.username) +
-        ' <small>@' + Ui.esc(m.username) + '</small></strong>' +
-        '<small>Joined ' + Ui.fullDate(m.joined_at) + '</small>' +
-        '<span class="row wrap" style="margin-top:0.25rem">' +
-        (m.is_owner ? Ui.badge('Owner', 'owner') : '') +
-        m.roles.map((r) => Ui.badge(Ui.esc(r.name), '')).join('') + '</span></span>' +
-        '<span class="row">' +
-        (manageRoles && !m.is_owner ? '<button type="button" class="btn btn-ghost btn-sm" data-roles="' + i + '">Roles</button>' : '') +
-        (kickPerm && !m.is_owner && m.id !== me.id ? '<button type="button" class="btn btn-ghost btn-sm" data-kick="' + Ui.esc(m.id) + '" data-kick-name="' + Ui.esc(m.display_name || m.username) + '">Kick</button>' : '') +
-        '</span></li>').join('') + '</ul>';
+    if (!msgs.length) {
+      feed.appendChild(emptyState('◌', 'No messages yet', 'Start the conversation.'));
+    }
+    for (const m of msgs) feed.appendChild(buildMsg(m));
+    groupFeed(feed);
+    thread.scrollTop = thread.scrollHeight;
+  }
 
-    box.querySelectorAll('[data-kick]').forEach((b) => {
-      b.onclick = async () => {
-        var yes = await Ui.confirmDialog({
-          title: 'Kick ' + b.dataset.kickName + '?',
-          message: 'They will leave the server immediately and can rejoin with a new invite.',
-          confirmText: 'Kick', danger: true,
-        });
-        if (!yes) return;
-        try {
-          await TrycordApi.kickMember(detail.id, b.dataset.kick);
-          Ui.toast('Member kicked.', 'good');
-          renderMembers(body, detail);
-          await Trycord.refreshServers();
-        } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-      };
+  function buildMsg(m) {
+    const node = messageRow(m, {
+      meId: State.me && State.me.id,
+      onEdit: () => editMsg(m),
+      onDelete: () => deleteMsg(m),
+      onDownload: (e, att) => downloadAtt(e, att),
     });
+    stampMsgNode(node, m);
+    return node;
+  }
 
-    if (manageRoles) {
-      var allRoles = await TrycordApi.roles(detail.id).catch(() => []);
-      box.querySelectorAll('[data-roles]').forEach((b) => {
-        b.onclick = () => roleAssignModal(detail, members[Number(b.dataset.roles)], allRoles, () => renderMembers(body, detail));
-      });
+  // Continuous-conversation grouping: same author, <5 min apart, later
+  // message collapses to avatar-space + body. Pure CSS class on top of
+  // the existing rows; actions stay reachable via :hover/:focus-within.
+  function stampMsgNode(node, m) {
+    try {
+      if (m && m.author_id) node.dataset.author = String(m.author_id);
+      if (m && m.created_at) node.dataset.ts = String(m.created_at);
+    } catch { /* grouping metadata is decorative */ }
+  }
+
+  function groupFeed(feedEl) {
+    let prev = null;
+    for (const node of feedEl.querySelectorAll(':scope > .msg')) {
+      const a = node.dataset.author || '';
+      const ts = Date.parse(node.dataset.ts || '') || 0;
+      const pa = prev ? (prev.dataset.author || '') : '';
+      const pts = prev ? (Date.parse(prev.dataset.ts || '') || 0) : 0;
+      const grouped = !!(prev && a && pa === a && ts >= pts && (ts - pts) < 5 * 60 * 1000);
+      node.classList.toggle('grouped', grouped);
+      prev = node;
     }
   }
 
-  function roleAssignModal(detail, member, allRoles, onDone) {
-    var wrap = document.createElement('div');
-    wrap.innerHTML = '<p class="muted">Roles for <b>' + Ui.esc(member.display_name || member.username) + '</b>:</p>' +
-      allRoles.map((r) => {
-        var has = member.roles.some((x) => x.id === r.id);
-        return '<label class="row" style="margin-bottom:0.4rem"><input type="checkbox" data-role="' + Ui.esc(r.id) + '"' +
-          (has ? ' checked' : '') + ' /> ' + Ui.esc(r.name) + '</label>';
-      }).join('');
-    Ui.openModal({
-      title: 'Edit roles',
-      body: wrap,
-      actions: [
-        { id: 'cancel', label: 'Cancel' },
-        {
-          id: 'save', label: 'Save', primary: true,
-          onClick: async (close, btns) => {
-            Ui.setLoading(btns.primary, true, 'Saving…');
-            var checks = wrap.querySelectorAll('[data-role]');
-            try {
-              for (var i = 0; i < checks.length; i++) {
-                var rid = checks[i].dataset.role;
-                var had = member.roles.some((x) => x.id === rid);
-                if (checks[i].checked && !had) await TrycordApi.assignRole(detail.id, rid, member.id);
-                if (!checks[i].checked && had) await TrycordApi.unassignRole(detail.id, rid, member.id);
-              }
-              close();
-              Ui.toast('Roles updated.', 'good');
-              onDone();
-            } catch (e) {
-              Ui.setLoading(btns.primary, false);
-              Ui.toast(Ui.friendlyError(e), 'bad');
-            }
-          },
-        },
-      ],
-    });
-  }
-
-  // --- roles --------------------------------------------------------------
-  async function renderRoles(body, detail) {
-    body.innerHTML = '<div id="roles-list">' + Ui.skeletons(3) + '</div>';
-    var box = document.getElementById('roles-list');
-    var roleList;
-    try {
-      roleList = await TrycordApi.roles(detail.id);
-    } catch (e) {
-      box.innerHTML = Ui.errorState(Ui.friendlyError(e));
-      return;
-    }
-    var allPerms = {};
-    try {
-      var p = await TrycordApi.serverPerms(detail.id);
-      allPerms = p.all || {};
-    } catch (e) { /* keep empty */ }
-    var permNames = Object.keys(allPerms);
-
-    box.innerHTML =
-      '<form id="role-new" class="toolbar"><input type="text" id="role-name" class="grow" maxlength="32" placeholder="New role name…" aria-label="New role name" />' +
-      '<button class="btn btn-sm" type="submit">+ Add role</button></form>' +
-      '<div class="stack">' + roleList.map((r) =>
-        '<section class="settings-card" data-role-card="' + Ui.esc(r.id) + '">' +
-        '<div class="row space"><h2 style="margin:0">' + Ui.esc(r.name) + '</h2>' +
-        '<span class="row">' + (r.is_default ? Ui.badge('Default', '') : '') +
-        (r.is_default ? '' : '<button type="button" class="btn btn-ghost btn-sm" data-role-del="' + Ui.esc(r.id) + '">Delete</button>') +
-        '</span></div>' +
-        '<div class="row wrap" style="margin:0.6rem 0">' +
-        permNames.map((pn) =>
-          '<label class="row small" style="margin-right:0.8rem"><input type="checkbox" data-role-perm="' + Ui.esc(r.id) + ':' + Ui.esc(pn) + '"' +
-          (r.permissions.indexOf(pn) !== -1 ? ' checked' : '') + ' title="' + Ui.esc(allPerms[pn] || pn) + '" /> ' +
-          Ui.esc(pn.replace(/_/g, ' ').toLowerCase()) + '</label>').join('') +
-        '</div>' +
-        '<button type="button" class="btn btn-primary btn-sm" data-role-save="' + Ui.esc(r.id) + '">Save permissions</button>' +
-        '</section>').join('') + '</div>';
-
-    document.getElementById('role-new').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      var input = document.getElementById('role-name');
-      if (!input.value.trim()) return;
+  function editMsg(m) {
+    const ta = el('textarea', { class: 'textarea', style: { minHeight: '70px' } }, m.content);
+    const save = el('button', { class: 'btn primary sm', type: 'button' }, 'Save');
+    const cancel = el('button', { class: 'btn ghost sm', type: 'button' }, 'Cancel');
+    const box = el('div', { class: 'modal' },
+      el('h3', {}, 'Edit message'), ta,
+      el('div', { class: 'row-line', style: { marginTop: 'var(--t-d-3)' } }, cancel, save));
+    const backdrop = el('div', { class: 'backdrop' }, box);
+    container.appendChild(backdrop);
+    cancel.addEventListener('click', () => backdrop.remove());
+    save.addEventListener('click', async () => {
       try {
-        await TrycordApi.createRole(detail.id, { name: input.value.trim(), permissions: [] });
-        Ui.toast('Role created.', 'good');
-        renderRoles(body, detail);
-      } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
+        await Api.updateMessage(channelId, m.id, { content: ta.value.trim() });
+        backdrop.remove();
+        await reload();
+      } catch (ex) { toast(ex.message || 'Cannot edit', 'error'); }
     });
+    ta.focus();
+  }
 
-    box.querySelectorAll('[data-role-save]').forEach((b) => {
-      b.onclick = async () => {
-        var rid = b.dataset.roleSave;
-        var checked = [];
-        box.querySelectorAll('[data-role-perm]').forEach((cb) => {
-          var parts = cb.dataset.rolePerm.split(':');
-          if (parts[0] === rid && cb.checked) checked.push(parts.slice(1).join(':'));
-        });
-        Ui.setLoading(b, true, 'Saving…');
-        try {
-          await TrycordApi.patchRole(detail.id, rid, { permissions: checked });
-          Ui.setLoading(b, false);
-          Ui.toast('Permissions saved.', 'good');
-        } catch (err) {
-          Ui.setLoading(b, false);
-          Ui.toast(Ui.friendlyError(err), 'bad');
+  async function deleteMsg(m) {
+    confirmDialog({
+      title: 'Delete message?', message: 'This cannot be undone.', danger: true, confirmText: 'Delete',
+      onConfirm: async () => {
+        try { await Api.deleteMessage(channelId, m.id); } catch (ex) { toast(ex.message || 'Cannot delete', 'error'); }
+      },
+    });
+  }
+
+  async function downloadAtt(e, att) {
+    // Authenticated download; raw blob so the file actually saves.
+    e.preventDefault();
+    try {
+      const res = await Api.fetchAttachment(att.id);
+      const blob = new Blob([res.buffer]);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = att.filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (ex) { toast(ex.message || 'Cannot download', 'error'); }
+  }
+
+  // ---- composer ----
+  const composer = el('div', { class: 'composer' });
+  const fileBtn = el('button', { class: 'file-btn', type: 'button', title: 'Attach file', 'aria-label': 'Attach file' }, '📎');
+  const fileInput = el('input', { type: 'file', hidden: true, multiple: true });
+  const ta = el('textarea', { placeholder: 'Message #' + chanName, rows: 1, 'aria-label': 'Message' });
+  const sendBtn = el('button', { class: 'btn primary', type: 'button' }, 'Send');
+  composer.appendChild(fileBtn);
+  composer.appendChild(fileInput);
+  composer.appendChild(ta);
+  composer.appendChild(el('div', { class: 'composer-actions' }, sendBtn));
+  conv.appendChild(composer);
+
+  let pending = [];
+  fileBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) return;
+    for (const f of files) {
+      if (f.size > 8 * 1024 * 1024) { toast('File too large: ' + f.name, 'error'); continue; }
+      try {
+        const res = await Api.uploadAttachment(channelId, f);
+        pending.push(res.attachment.id);
+        toast('Uploaded ' + f.name, 'ok');
+      } catch (ex) { toast(ex.message || 'Upload failed', 'error'); }
+    }
+    fileInput.value = '';
+  });
+
+  function resize() {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+  }
+  ta.addEventListener('input', resize);
+
+  async function send() {
+    const content = ta.value.trim();
+    if (!content && !pending.length) return;
+    if (!content) { toast('Add a message or file', 'warn'); return; }
+    sendBtn.setAttribute('aria-busy', 'true');
+    try {
+      await Api.sendMessage(channelId, { content, attachmentIds: pending.length ? pending : undefined });
+      ta.value = '';
+      pending = [];
+      resize();
+      await reload();
+    } catch (ex) {
+      toast(ex.message || 'Cannot send', 'error');
+    } finally {
+      sendBtn.removeAttribute('aria-busy');
+    }
+  }
+  sendBtn.addEventListener('click', send);
+  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+
+  container.appendChild(conv);
+  activeChannelId = channelId;
+  await reload();
+  Realtime.join(channelId);
+
+  // Live updates
+  const offMsg = Realtime.on('message', (m) => {
+    if (String(m.channel_id) === String(channelId)) {
+      const node = messageRow(m, { meId: State.me && State.me.id, onEdit: () => editMsg(m), onDelete: () => deleteMsg(m), onDownload: downloadAtt });
+      stampMsgNode(node, m);
+      feed.appendChild(node);
+      groupFeed(feed);
+      thread.scrollTop = thread.scrollHeight;
+    }
+  });
+  const offUpd = Realtime.on('message_updated', (m) => {
+    if (String(m.channel_id) === String(channelId)) {
+      const node = feed.querySelector('[data-message-id="' + m.id + '"]');
+      if (node) {
+        const t = node.querySelector('.msg-text');
+        if (t) t.textContent = m.content;
+        const head = node.querySelector('.msg-head');
+        if (head && !head.querySelector('.msg-edited')) head.appendChild(el('span', { class: 'msg-edited' }, 'edited'));
+      }
+    }
+  });
+  const offDel = Realtime.on('message_deleted', (m) => {
+    if (String(m.channel_id) === String(channelId)) {
+      const node = feed.querySelector('[data-message-id="' + m.id + '"]');
+      if (node) {
+        clear(node.querySelector('.msg-body') || node);
+        node.classList.add('deleted');
+        node.querySelector('.msg-body').appendChild(el('div', { class: 'msg-text' }, 'Message deleted'));
+      }
+    }
+  });
+
+  // Clean up when the route changes
+  const cleanup = () => {
+    offMsg(); offUpd(); offDel();
+    Realtime.leaveChannel();
+    activeChannelId = null;
+  };
+  container._cleanup = cleanup;
+  renderAllChrome();
+}
+
+// ---- community management surfaces ----------------------------------------
+
+async function renderServerMembers(container, serverId) {
+  clear(container);
+  let server;
+  try { ({ detail: server } = await ensureServer(serverId)); }
+  catch (ex) { container.appendChild(el('div', { class: 'form-error' }, ex.message || 'Cannot open this community')); return; }
+  renderContextHeader({ title: 'Members', sub: server.name });
+  const wrap = el('div', { class: 'page atrium community-manager' });
+  const head = el('div', { class: 'community-manager__head' },
+    el('div', {}, el('h1', {}, 'Members'), el('p', { class: 'muted' }, 'Manage the people who belong to this community.')),
+    el('button', { class: 'btn', type: 'button', onClick: () => { location.hash = '#/server/' + serverId; } }, 'Back to chat'));
+  wrap.appendChild(head);
+  const search = el('input', { class: 'input', type: 'search', placeholder: 'Search members…' });
+  wrap.appendChild(el('div', { class: 'community-manager__toolbar' }, search));
+  const list = el('div', { class: 'community-list' });
+  wrap.appendChild(list);
+  const paint = () => {
+    clear(list);
+    const q = search.value.trim().toLowerCase();
+    const members = (State.members || []).filter(m => !q || String(m.username || '').toLowerCase().includes(q) || String(m.display_name || '').toLowerCase().includes(q) || String(m.nickname || '').toLowerCase().includes(q));
+    if (!members.length) { list.appendChild(emptyState('⌕', 'No members found', q ? 'Try a different search.' : 'This community has no visible members.')); return; }
+    for (const m of members) {
+      const id = m.user_id || m.id;
+      const row = el('article', { class: 'community-member-card' });
+      row.appendChild(avatar({ id, username: m.username, displayName: m.nickname || m.display_name, avatarUrl: m.avatar_url }, { size: 'sm', withPresence: true }));
+      const info = el('div', { class: 'community-member-card__info' });
+      info.appendChild(el('strong', {}, m.nickname || m.display_name || m.username || 'Unknown'));
+      info.appendChild(el('span', { class: 'muted small' }, '@' + (m.username || 'unknown')));
+      const roles = Array.isArray(m.roles) ? m.roles : [];
+      const roleBox = el('div', { class: 'role-pills' });
+      if (m.is_owner) roleBox.appendChild(el('span', { class: 'role-pill owner' }, 'Owner'));
+      for (const r of roles.slice(0, 5)) roleBox.appendChild(el('span', { class: 'role-pill' }, r.name || 'Role'));
+      if (!m.is_owner && !roles.length) roleBox.appendChild(el('span', { class: 'role-pill muted-role' }, 'Member'));
+      info.appendChild(roleBox);
+      row.appendChild(info);
+      const actions = el('div', { class: 'community-member-card__actions' });
+      actions.appendChild(el('button', { class: 'btn sm', type: 'button', onClick: () => { location.hash = '#/users/' + id; } }, 'Profile'));
+      if (String(id) === String(State.me && State.me.id) || can('KICK_MEMBERS')) {
+        actions.appendChild(el('button', { class: 'btn sm', type: 'button', onClick: () => openNicknameModal(serverId, m, wrap) }, 'Nickname'));
+      }
+      if (can('MANAGE_ROLES') && !m.is_owner) {
+        const roleSelect = el('select', { class: 'input sm', title: 'Assign role' });
+        roleSelect.appendChild(el('option', { value: '' }, 'Role…'));
+        for (const role of State.roles || []) {
+          if (role.is_default) continue;
+          const opt = el('option', { value: role.id }, role.name || 'Role');
+          roleSelect.appendChild(opt);
         }
-      };
-    });
-
-    box.querySelectorAll('[data-role-del]').forEach((b) => {
-      b.onclick = async () => {
-        var yes = await Ui.confirmDialog({
-          title: 'Delete role?', message: 'Members keep their membership but lose this role.',
-          confirmText: 'Delete', danger: true,
+        roleSelect.addEventListener('change', async () => {
+          if (!roleSelect.value) return;
+          try { await Api.assignRole(serverId, roleSelect.value, id); await enterServer(serverId); paint(); toast('Role assigned.', 'ok'); }
+          catch (ex) { toast(ex.message || 'Could not assign role.', 'error'); }
+          finally { roleSelect.value = ''; }
         });
-        if (!yes) return;
-        try {
-          await TrycordApi.deleteRole(detail.id, b.dataset.roleDel);
-          Ui.toast('Role deleted.', 'good');
-          renderRoles(body, detail);
-        } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-      };
-    });
-  }
-
-  // --- invites ------------------------------------------------------------
-  async function renderInvites(body, detail) {
-    body.innerHTML =
-      '<section class="settings-card"><h2>New invite</h2>' +
-      '<form id="inv-new" class="toolbar">' +
-      '<label class="small muted">Max uses <input type="number" id="inv-max" min="1" max="100" placeholder="∞" style="width:5rem" /></label>' +
-      '<label class="small muted">Expires <select id="inv-exp">' +
-      '<option value="">Never</option><option value="1">1 hour</option>' +
-      '<option value="24" selected>24 hours</option><option value="168">7 days</option></select></label>' +
-      '<button class="btn btn-primary btn-sm" type="submit">Create invite</button></form></section>' +
-      '<section class="section" style="margin-top:1rem"><h2>Active invites</h2><div id="inv-list">' + Ui.skeletons(3) + '</div></section>';
-
-    async function reload() {
-      var box = document.getElementById('inv-list');
-      if (!box) return;
-      var list;
-      try {
-        list = await TrycordApi.invites(detail.id);
-      } catch (e) {
-        box.innerHTML = Ui.errorState(Ui.friendlyError(e));
-        return;
+        actions.appendChild(roleSelect);
       }
-      var alive = list.filter((i) => !i.revoked);
-      box.innerHTML = alive.length ? '<ul class="member-list">' + alive.map((i) =>
-        '<li class="member-item"><span class="who"><strong class="code-chip">⌁ ' + Ui.esc(i.code) + '</strong> ' +
-        '<small>by @' + Ui.esc(i.creator_name) + ' · ' + i.uses + (i.max_uses ? '/' + i.max_uses : '') + ' used' +
-        (i.expires_at ? ' · expires ' + Ui.fullDate(i.expires_at) : ' · never expires') + '</small></span>' +
-        '<span class="row"><button type="button" class="btn btn-ghost btn-sm" data-inv-copy="' + Ui.esc(i.code) + '">Copy</button>' +
-        '<button type="button" class="btn btn-ghost btn-sm" data-inv-revoke="' + Ui.esc(i.id) + '">Revoke</button></span></li>'
-      ).join('') + '</ul>'
-        : Ui.emptyState({ icon: '✉', title: 'No active invites', hint: 'Create one above to let people join.' });
-      box.querySelectorAll('[data-inv-copy]').forEach((b) => {
-        b.onclick = () => copyText(b.dataset.invCopy, 'Invite copied.');
-      });
-      box.querySelectorAll('[data-inv-revoke]').forEach((b) => {
-        b.onclick = async () => {
-          try {
-            await TrycordApi.revokeInvite(detail.id, b.dataset.invRevoke);
-            Ui.toast('Invite revoked.', 'good');
-            reload();
-          } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-        };
-      });
-    }
-
-    document.getElementById('inv-new').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      var maxRaw = document.getElementById('inv-max').value;
-      try {
-        var inv = await TrycordApi.createInvite(detail.id, {
-          maxUses: maxRaw ? Number(maxRaw) : undefined,
-          expiresInHours: document.getElementById('inv-exp').value || undefined,
-        });
-        Ui.toast('Invite created: ' + inv.code, 'good');
-        copyText(inv.code, 'Invite copied: ' + inv.code);
-        reload();
-      } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-    });
-    reload();
-  }
-
-  // --- settings (MANAGE_SERVER) --------------------------------------------
-  function renderSettings(body, detail) {
-    var manageChannels = can('MANAGE_CHANNELS');
-    var isOwner = detail.is_owner;
-    var vis = !detail.is_public ? 'private' : (detail.is_discoverable ? 'listed' : 'unlisted');
-    body.innerHTML =
-      '<div class="settings-grid">' +
-      '<section class="settings-card"><h2>Server settings</h2>' +
-      '<form id="srv-form">' +
-      '<label class="field"><span>Name</span><input type="text" id="srv-name" maxlength="64" value="' + Ui.esc(detail.name) + '" /></label>' +
-      '<label class="field"><span>Description</span><textarea id="srv-desc" maxlength="500">' + Ui.esc(detail.description || '') + '</textarea></label>' +
-      '<label class="field"><span>Visibility</span><select id="srv-vis">' +
-      '<option value="listed"' + (vis === 'listed' ? ' selected' : '') + '>Public — listed in Discover</option>' +
-      '<option value="unlisted"' + (vis === 'unlisted' ? ' selected' : '') + '>Public — unlisted (join via code/invite)</option>' +
-      '<option value="private"' + (vis === 'private' ? ' selected' : '') + '>Private — invite only</option>' +
-      '</select></label>' +
-      '<div class="form-row" style="margin-top:0.8rem"><button class="btn btn-primary" type="submit" id="srv-save">Save changes</button></div>' +
-      '</form></section>' +
-      '<section class="settings-card"><h2>Join codes</h2>' +
-      '<p class="hint">Legacy permanent code (works even for private servers — share carefully):</p>' +
-      '<p><span class="code-chip">⌁ ' + Ui.esc(detail.join_code) + '</span></p>' +
-      '<p class="hint">For expiring, limited-use codes, use the <a href="#/server/' + encodeURIComponent(detail.id) + '/invites">Invites</a> tab.</p></section>' +
-      '<section class="settings-card"><h2>My preferences for this server</h2>' +
-      '<div class="form-row"><button class="btn btn-ghost btn-sm" id="pref-fav" type="button" aria-pressed="' + (TrycordState.isFav(detail.id) ? 'true' : 'false') + '">' +
-      (TrycordState.isFav(detail.id) ? '★ Favorited' : '☆ Add to favorites') + '</button>' +
-      '<button class="btn btn-ghost btn-sm" id="pref-mute" type="button" aria-pressed="' + (TrycordState.isMutedServer(detail.id) ? 'true' : 'false') + '">' +
-      (TrycordState.isMutedServer(detail.id) ? 'Unmute server' : 'Mute server') + '</button>' +
-      '<button class="btn btn-ghost btn-sm" id="pref-expand" type="button">Expand all categories</button></div>' +
-      '<p class="hint">Favorites, mutes, and collapsed categories are stored on this device, per server.</p></section>' +
-      (manageChannels
-        ? '<section class="settings-card"><h2>Categories</h2><div id="cat-list"></div>' +
-          '<form id="cat-new" class="toolbar" style="margin-top:0.6rem"><input type="text" id="cat-name" class="grow" maxlength="32" placeholder="New category…" aria-label="New category name" />' +
-          '<button class="btn btn-sm" type="submit">Add</button></form></section>'
-        : '') +
-      '<section class="settings-card"><h2>Danger zone</h2>' +
-      (!isOwner ? '<p class="hint">You are a member of this server.</p><button class="btn btn-ghost" type="button" id="leave-btn2">Leave server</button>' : '') +
-      (isOwner ? '<p class="hint">Deleting a server permanently removes its channels, messages, roles, and invites.</p><button class="btn btn-danger" type="button" id="del-server">Delete server</button>' : '') +
-      '</section></div>';
-
-    document.getElementById('srv-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      var nameEl = document.getElementById('srv-name');
-      if (!Ui.fieldError(nameEl, nameEl.value.trim() ? '' : 'Name cannot be empty.')) return;
-      var v = document.getElementById('srv-vis').value;
-      var btn = document.getElementById('srv-save');
-      Ui.setLoading(btn, true, 'Saving…');
-      try {
-        await TrycordApi.patchServer(detail.id, {
-          name: nameEl.value.trim(),
-          description: document.getElementById('srv-desc').value.trim(),
-          isPublic: v !== 'private',
-          isDiscoverable: v === 'listed',
-        });
-        await Trycord.refreshServers();
-        Ui.setLoading(btn, false);
-        Ui.toast('Server updated.', 'good');
-        workspace(document.getElementById('view'), detail.id, 'settings');
-      } catch (err) {
-        Ui.setLoading(btn, false);
-        Ui.toast(Ui.friendlyError(err), 'bad');
+      if (!m.is_owner && can('KICK_MEMBERS')) {
+        actions.appendChild(el('button', { class: 'btn danger sm', type: 'button', onClick: async () => {
+          try { await Api.kickMember(serverId, id); await enterServer(serverId); paint(); toast('Member removed.', 'ok'); }
+          catch (ex) { toast(ex.message || 'Could not remove member.', 'error'); }
+        } }, 'Remove'));
       }
-    });
-
-    document.getElementById('pref-fav').onclick = (e) => {
-      var nowFav = TrycordState.toggleFav(detail.id);
-      e.currentTarget.textContent = nowFav ? '★ Favorited' : '☆ Add to favorites';
-      e.currentTarget.setAttribute('aria-pressed', nowFav ? 'true' : 'false');
-    };
-    document.getElementById('pref-mute').onclick = (e) => {
-      var muted = TrycordState.toggleMuteServer(detail.id);
-      e.currentTarget.textContent = muted ? 'Unmute server' : 'Mute server';
-      e.currentTarget.setAttribute('aria-pressed', muted ? 'true' : 'false');
-      Trycord.paintUnread();
-    };
-    document.getElementById('pref-expand').onclick = () => {
-      TrycordState.resetCollapsed(detail.id);
-      Ui.toast('All categories expanded.', 'info');
-    };
-
-    if (manageChannels) loadCategories(body, detail);
-
-    var leaveBtn = document.getElementById('leave-btn2');
-    if (leaveBtn) {
-      leaveBtn.onclick = () => C.leaveServerFlow(detail.id, detail.name);
+      row.appendChild(actions);
+      list.appendChild(row);
     }
-    var delBtn = document.getElementById('del-server');
-    if (delBtn) {
-      delBtn.onclick = async () => {
-        var yes = await Ui.confirmDialog({
-          title: 'Delete ' + detail.name + '?',
-          message: 'This permanently deletes channels, messages, roles, and invites. This cannot be undone.',
-          confirmText: 'Delete forever', danger: true,
-        });
-        if (!yes) return;
-        try {
-          await TrycordApi.deleteServer(detail.id);
-          await Trycord.refreshServers();
-          Ui.toast('Server deleted.', 'info');
-          location.hash = '#/servers';
-        } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-      };
-    }
+  };
+  search.addEventListener('input', paint);
+  paint();
+  container.appendChild(wrap);
+}
+
+async function renderServerRoles(container, serverId) {
+  clear(container);
+  let server;
+  try { ({ detail: server } = await ensureServer(serverId)); }
+  catch (ex) { container.appendChild(el('div', { class: 'form-error' }, ex.message || 'Cannot open this community')); return; }
+  renderContextHeader({ title: 'Roles', sub: server.name });
+  const wrap = el('div', { class: 'page atrium community-manager' });
+  wrap.appendChild(el('div', { class: 'community-manager__head' },
+    el('div', {}, el('h1', {}, 'Roles'), el('p', { class: 'muted' }, 'Define visible roles and the permissions they grant.')),
+    el('button', { class: 'btn', type: 'button', onClick: () => { location.hash = '#/server/' + serverId; } }, 'Back to chat')));
+  if (!can('MANAGE_ROLES')) {
+    wrap.appendChild(el('div', { class: 'form-error' }, 'You need Manage Roles permission to edit roles.'));
+    const list = el('div', { class: 'community-list' });
+    for (const r of State.roles || []) list.appendChild(el('div', { class: 'community-role-card' }, el('strong', {}, r.name || 'Role'), el('span', { class: 'muted small' }, String((r.permissions || []).length) + ' permissions')));
+    wrap.appendChild(list); container.appendChild(wrap); return;
   }
+  const permsInfo = await Api.serverPermissions(serverId).catch(() => ({ all: [] }));
+  const allPerms = Array.isArray(permsInfo.all) ? permsInfo.all : [];
+  const list = el('div', { class: 'community-list' });
+  const formWrap = el('div', { class: 'community-role-editor' });
+  const name = el('input', { class: 'input', type: 'text', maxlength: 32, placeholder: 'Role name' });
+  const permGrid = el('div', { class: 'permission-grid' });
+  const checks = new Map();
+  for (const perm of allPerms) {
+    const input = el('input', { type: 'checkbox' });
+    checks.set(perm, input);
+    permGrid.appendChild(el('label', { class: 'permission-item' }, input, el('span', {}, perm)));
+  }
+  const create = el('button', { class: 'btn primary', type: 'button' }, 'Create role');
+  formWrap.append(el('div', { class: 'field' }, el('label', {}, 'Role name'), name), el('div', { class: 'section-label' }, 'Permissions'), permGrid, create);
+  wrap.appendChild(formWrap); wrap.appendChild(el('div', { class: 'section-label' }, 'Existing roles')); wrap.appendChild(list);
+  const paint = () => {
+    clear(list);
+    for (const role of [...(State.roles || [])].sort((a,b) => (Number(b.position)||0)-(Number(a.position)||0))) {
+      const row = el('article', { class: 'community-role-card' });
+      const title = el('div', { class: 'community-role-card__main' });
+      title.appendChild(el('span', { class: 'role-pill' }, role.name || 'Role'));
+      title.appendChild(el('span', { class: 'muted small' }, String((role.permissions || []).length) + ' permissions'));
+      row.appendChild(title);
+      if (!role.is_default) {
+        const actions = el('div', { class: 'community-member-card__actions' });
+        const del = el('button', { class: 'btn danger sm', type: 'button' }, 'Delete');
+        del.addEventListener('click', async () => {
+          try { await Api.deleteRole(serverId, role.id); await enterServer(serverId); paint(); toast('Role deleted.', 'ok'); }
+          catch (ex) { toast(ex.message || 'Could not delete role.', 'error'); }
+        });
+        actions.appendChild(del); row.appendChild(actions);
+      }
+      list.appendChild(row);
+    }
+  };
+  create.addEventListener('click', async () => {
+    const roleName = name.value.trim();
+    if (!roleName) { toast('Enter a role name.', 'warn'); return; }
+    const permissions = [...checks.entries()].filter(([, input]) => input.checked).map(([key]) => key);
+    try { await Api.createRole(serverId, { name: roleName, permissions }); name.value = ''; checks.forEach(i => { i.checked = false; }); await enterServer(serverId); paint(); toast('Role created.', 'ok'); }
+    catch (ex) { toast(ex.message || 'Could not create role.', 'error'); }
+  });
+  paint(); container.appendChild(wrap);
+}
 
-  async function loadCategories(body, detail) {
-    var box = body.querySelector('#cat-list');
-    if (!box) return;
-    var data;
+async function renderServerCategories(container, serverId) {
+  clear(container);
+  let server;
+  try { ({ detail: server } = await ensureServer(serverId)); }
+  catch (ex) { container.appendChild(el('div', { class: 'form-error' }, ex.message || 'Cannot open this community')); return; }
+  renderContextHeader({ title: 'Categories', sub: server.name });
+  const wrap = el('div', { class: 'page atrium community-manager' });
+  wrap.appendChild(el('div', { class: 'community-manager__head' },
+    el('div', {}, el('h1', {}, 'Channel categories'), el('p', { class: 'muted' }, 'Organize channels into clean sections.')),
+    el('button', { class: 'btn', type: 'button', onClick: () => { location.hash = '#/server/' + serverId; } }, 'Back to chat')));
+  if (!can('MANAGE_CHANNELS')) { wrap.appendChild(el('div', { class: 'form-error' }, 'You need Manage Channels permission to edit categories.')); container.appendChild(wrap); return; }
+  const createRow = el('div', { class: 'community-manager__toolbar' });
+  const input = el('input', { class: 'input', type: 'text', maxlength: 64, placeholder: 'New category name' });
+  const add = el('button', { class: 'btn primary', type: 'button' }, 'Add category');
+  createRow.append(input, add); wrap.appendChild(createRow);
+  const list = el('div', { class: 'community-list' }); wrap.appendChild(list);
+  const paint = () => {
+    clear(list);
+    const cats = State.channels.categories || [];
+    if (!cats.length) { list.appendChild(emptyState('≡', 'No categories', 'Channels without a category appear under Text channels.')); return; }
+    for (const cat of cats) {
+      const channels = (State.channels.channels || []).filter(c => String(c.category_id) === String(cat.id));
+      const row = el('article', { class: 'community-category-card' });
+      const main = el('div', { class: 'community-category-card__main' });
+      main.appendChild(el('strong', {}, cat.name || 'Category'));
+      main.appendChild(el('span', { class: 'muted small' }, channels.length + ' channel' + (channels.length === 1 ? '' : 's')));
+      row.appendChild(main);
+      const del = el('button', { class: 'btn danger sm', type: 'button' }, 'Delete');
+      del.addEventListener('click', async () => {
+        try { await Api.deleteCategory(serverId, cat.id); await enterServer(serverId); paint(); toast('Category deleted.', 'ok'); }
+        catch (ex) { toast(ex.message || 'Could not delete category.', 'error'); }
+      });
+      row.appendChild(del); list.appendChild(row);
+    }
+  };
+  add.addEventListener('click', async () => {
+    const n = input.value.trim(); if (!n) return;
+    try { await Api.createCategory(serverId, { name: n }); input.value = ''; await enterServer(serverId); paint(); toast('Category created.', 'ok'); }
+    catch (ex) { toast(ex.message || 'Could not create category.', 'error'); }
+  });
+  paint(); container.appendChild(wrap);
+}
+
+// ---- create channel ---------------------------------------------------------
+
+async function renderNewChannel(container, serverId) {
+  clear(container);
+  try { await ensureServer(serverId); } catch { /* toast below */ }
+  if (!can('MANAGE_CHANNELS')) {
+    renderContextHeader({ title: 'New channel' });
+    container.appendChild(el('div', { class: 'form-error' }, 'You need permission to manage channels in this community.'));
+    return;
+  }
+  renderContextHeader({ title: 'New channel' });
+  const wrap = el('div', { class: 'auth-wrap' });
+  const card = el('div', { class: 'auth-box' });
+  const err = el('div', { class: 'form-error', hidden: true });
+  const name = el('input', { class: 'input', type: 'text', placeholder: 'channel-name', maxlength: 32, required: true });
+  const topic = el('input', { class: 'input', type: 'text', placeholder: 'Topic (optional)', maxlength: 200 });
+  const catSelect = el('select', { class: 'select' });
+  catSelect.appendChild(el('option', { value: '' }, 'No category'));
+  for (const c of (State.channels.categories || [])) catSelect.appendChild(el('option', { value: c.id }, c.name));
+  const createBtn = el('button', { class: 'btn primary block', type: 'submit' }, 'Create channel');
+
+  const form = el('form', {}, err,
+    el('div', { class: 'field' }, el('label', {}, 'Channel name'), name),
+    el('div', { class: 'field' }, el('label', {}, 'Topic'), topic),
+    el('div', { class: 'field' }, el('label', {}, 'Category'), catSelect),
+    createBtn);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
     try {
-      data = await TrycordApi.channels(detail.id);
-    } catch (e) {
-      box.innerHTML = Ui.errorState(Ui.friendlyError(e));
+      const ch = await Api.createChannel(serverId, {
+        name: name.value.trim(),
+        topic: topic.value.trim() || undefined,
+        categoryId: catSelect.value || undefined,
+      });
+      toast('Channel created.', 'ok');
+      location.hash = '#/server/' + serverId + '/channel/' + ch.id;
+    } catch (ex) { err.hidden = false; err.textContent = ex.message || 'Failed'; }
+  });
+
+  card.appendChild(el('h1', {}, 'Create a channel'));
+  card.appendChild(el('p', { class: 'auth-sub' }, 'Channels are how your community talks.'));
+  card.appendChild(form);
+  wrap.appendChild(card);
+  container.appendChild(wrap);
+}
+
+// ---- invites ----------------------------------------------------------------
+
+async function renderInvites(container, serverId) {
+  clear(container);
+  let server;
+  try { ({ detail: server } = await ensureServer(serverId)); }
+  catch (ex) { container.appendChild(el('div', { class: 'form-error' }, ex.message)); return; }
+  if (!can('MANAGE_INVITES')) {
+    renderContextHeader({ title: 'Invites', sub: server.name });
+    container.appendChild(el('div', { class: 'form-error' }, 'You need permission to manage invites in this community.'));
+    return;
+  }
+  renderContextHeader({ title: 'Invites', sub: server.name });
+  const wrap = el('div', { class: 'page atrium' });
+
+  const createBtn = el('button', { class: 'btn primary', type: 'button' }, 'Create invite');
+  const maxUses = el('input', { class: 'input', type: 'number', min: 1, max: 100, value: '1', style: { width: '70px' }, title: 'Max uses' });
+  const hours = el('input', { class: 'input', type: 'number', min: 1, max: 720, value: '48', style: { width: '80px' }, title: 'Hours valid' });
+  const createRow = el('div', { class: 'row-line' },
+    el('span', { class: 'muted small' }, 'Uses'), maxUses,
+    el('span', { class: 'muted small' }, 'Hours'), hours, createBtn);
+  wrap.appendChild(createRow);
+
+  const listPane = el('div', { class: 'stack' });
+  wrap.appendChild(listPane);
+
+  async function reload() {
+    clear(listPane);
+    let invites = [];
+    try { invites = await Api.invites(serverId); } catch { /* ignore */ }
+    if (!invites.length) {
+      listPane.appendChild(emptyState('◇', 'No invites yet', 'Create one above to share a link.'));
       return;
     }
-    var cats = data.categories || [];
-    box.innerHTML = cats.length ? '<ul class="member-list">' + cats.map((c) =>
-      '<li class="member-item"><span class="who"><strong>' + Ui.esc(c.name) + '</strong></span>' +
-      '<button type="button" class="btn btn-ghost btn-sm" data-cat-del="' + Ui.esc(c.id) + '">Delete</button></li>'
-    ).join('') + '</ul>' : '<p class="muted">No categories — channels are ungrouped.</p>';
-    box.querySelectorAll('[data-cat-del]').forEach((b) => {
-      b.onclick = async () => {
-        try {
-          await TrycordApi.deleteCategory(detail.id, b.dataset.catDel);
-          Ui.toast('Category deleted (channels kept).', 'good');
-          loadCategories(body, detail);
-          var d2 = await TrycordApi.channels(detail.id);
-          navData.cats = d2.categories || [];
-          navData.channels = d2.channels || [];
-          paintServerNav();
-        } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
-      };
-    });
-    var form = document.getElementById('cat-new');
-    if (form && !form.dataset.bound) {
-      form.dataset.bound = '1';
-      form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        var input = document.getElementById('cat-name');
-        if (!input.value.trim()) return;
-        try {
-          await TrycordApi.createCategory(detail.id, { name: input.value.trim() });
-          Ui.toast('Category created.', 'good');
-          loadCategories(body, detail);
-        } catch (err) { Ui.toast(Ui.friendlyError(err), 'bad'); }
+    for (const inv of invites) {
+      const row = el('div', { class: 'row' });
+      const m = el('div', { class: 'row-main' });
+      const link = location.origin + '/#/invite/' + inv.code;
+      m.appendChild(el('div', { class: 'row-title mono' }, inv.code));
+      m.appendChild(el('div', { class: 'row-sub' },
+        inv.uses + ' uses' +
+        (inv.max_uses ? '/' + inv.max_uses : '') +
+        (inv.expires_at ? ' · expires ' + relTime(inv.expires_at) : '') +
+        (inv.revoked ? ' · REVOKED' : '')));
+      row.appendChild(m);
+      const copyBtn = el('button', { class: 'btn sm', type: 'button' }, 'Copy link');
+      copyBtn.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(link); toast('Invite link copied.', 'ok'); }
+        catch { toast(link, 'info'); }
       });
+      const delBtn = el('button', { class: 'btn danger sm', type: 'button' }, 'Revoke');
+      delBtn.addEventListener('click', async () => {
+        try { await Api.deleteInvite(serverId, inv.id); await reload(); } catch (ex) { toast(ex.message || 'Failed', 'error'); }
+      });
+      row.appendChild(copyBtn);
+      row.appendChild(delBtn);
+      listPane.appendChild(row);
     }
   }
 
-  window.TrycordPagesWorkspace = { workspace, cleanup: closeChat, paintUnread, currentChannel };
-})();
+  createBtn.addEventListener('click', async () => {
+    try {
+      await Api.createInvite(serverId, { maxUses: parseInt(maxUses.value, 10) || null, expiresInHours: parseInt(hours.value, 10) || 48 });
+      await reload();
+      toast('Invite created.', 'ok');
+    } catch (ex) { toast(ex.message || 'Failed', 'error'); }
+  });
+
+  container.appendChild(wrap);
+  await reload();
+}
+
+// ---- server settings --------------------------------------------------------
+
+async function renderServerSettings(container, serverId) {
+  clear(container);
+  let server;
+  try { ({ detail: server } = await ensureServer(serverId)); }
+  catch (ex) { container.appendChild(el('div', { class: 'form-error' }, ex.message)); return; }
+  if (!can('MANAGE_SERVER')) {
+    renderContextHeader({ title: 'Settings', sub: server.name });
+    container.appendChild(el('div', { class: 'form-error' }, 'You need permission to manage this community\'s settings.'));
+    return;
+  }
+  renderContextHeader({ title: 'Settings', sub: server.name });
+  const wrap = el('div', { class: 'auth-wrap' });
+  const card = el('div', { class: 'auth-box' });
+  const err = el('div', { class: 'form-error', hidden: true });
+  const ok = el('div', { class: 'form-success', hidden: true });
+  const name = el('input', { class: 'input', type: 'text', value: server.name || '', maxlength: 64 });
+  const desc = el('textarea', { class: 'textarea', maxlength: 400, placeholder: 'Description' }, server.description || '');
+  const isPublic = el('input', { type: 'checkbox', checked: !!server.is_public });
+  const isDisc = el('input', { type: 'checkbox', checked: !!server.is_discoverable });
+  const saveBtn = el('button', { class: 'btn primary', type: 'submit' }, 'Save changes');
+
+  const form = el('form', {}, err, ok,
+    el('div', { class: 'field' }, el('label', {}, 'Name'), name),
+    el('div', { class: 'field' }, el('label', {}, 'Description'), desc),
+    el('div', { class: 'field' }, el('label', { class: 'switch' }, isPublic, ' Public (joinable by link)')),
+    el('div', { class: 'field' }, el('label', { class: 'switch' }, isDisc, ' Discoverable in browse')),
+    saveBtn);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await Api.updateServer(serverId, {
+        name: name.value.trim(),
+        description: desc.value.trim(),
+        isPublic: isPublic.checked,
+        isDiscoverable: isDisc.checked,
+      });
+      await refreshServers();
+      await ensureServer(serverId);
+      ok.hidden = false;
+      toast('Settings saved.', 'ok');
+    } catch (ex) { err.hidden = false; err.textContent = ex.message || 'Failed'; }
+  });
+
+  card.appendChild(form);
+
+  const management = el('div', { class: 'community-manager__toolbar', style: { marginTop: 'var(--t-d-5)', flexWrap: 'wrap' } });
+  management.appendChild(el('button', { class: 'btn', type: 'button', onClick: () => { location.hash = '#/server/' + serverId + '/members'; } }, 'Members'));
+  management.appendChild(el('button', { class: 'btn', type: 'button', onClick: () => { location.hash = '#/server/' + serverId + '/roles'; } }, 'Roles'));
+  management.appendChild(el('button', { class: 'btn', type: 'button', onClick: () => { location.hash = '#/server/' + serverId + '/categories'; } }, 'Categories'));
+  management.appendChild(el('button', { class: 'btn', type: 'button', onClick: () => { location.hash = '#/server/' + serverId + '/invites'; } }, 'Invites'));
+  card.appendChild(management);
+
+  const danger = el('div', { class: 'hr' });
+  card.appendChild(danger);
+  const leaveBtn = el('button', { class: 'btn danger block', type: 'button' }, 'Leave server');
+  leaveBtn.addEventListener('click', async () => {
+    if (server.is_owner) { toast('You own this server. Transfer or delete it first.', 'warn'); return; }
+    confirmDialog({
+      title: 'Leave ' + server.name + '?', message: 'You can rejoin later with a new invite.', danger: true, confirmText: 'Leave',
+      onConfirm: async () => {
+        try {
+          await Api.leaveServer(serverId);
+          await refreshServers();
+          leaveServerContext();
+          location.hash = '#/home';
+        } catch (ex) { toast(ex.message || 'Failed', 'error'); }
+      },
+    });
+  });
+  card.appendChild(leaveBtn);
+
+  if (server.is_owner) {
+    card.appendChild(el('div', { class: 'hr' }));
+    const delInput = el('input', { class: 'input', type: 'text', placeholder: 'Type server name to confirm' });
+    const delBtn = el('button', { class: 'btn danger block', type: 'button', style: { marginTop: 'var(--t-d-3)' } }, 'Delete server');
+    card.appendChild(el('div', { class: 'field' }, el('label', {}, 'Danger zone — delete server'), delInput, delBtn));
+    delBtn.addEventListener('click', async () => {
+      if (delInput.value.trim() !== server.name) { toast('Type the exact server name to confirm.', 'warn'); return; }
+      confirmDialog({
+        title: 'Delete ' + server.name + '?',
+        message: 'This permanently deletes the server, its channels, messages and members. This cannot be undone.',
+        danger: true, confirmText: 'Delete forever',
+        onConfirm: async () => {
+          try {
+            await Api.deleteServer(serverId);
+            await refreshServers();
+            leaveServerContext();
+            toast('Server deleted.', 'warn');
+            location.hash = '#/home';
+          } catch (ex) { toast(ex.message || 'Failed', 'error'); }
+        },
+      });
+    });
+  }
+
+  wrap.appendChild(card);
+  container.appendChild(wrap);
+}
+
+// ---- new server -------------------------------------------------------------
+
+async function renderNewServer(container, serverId) {
+  clear(container);
+  if (serverId) container.classList.add('hide-nav'); // not used by desktop chrome
+  renderContextHeader({ title: 'Create a server' });
+  const wrap = el('div', { class: 'auth-wrap' });
+  const card = el('div', { class: 'auth-box' });
+  const err = el('div', { class: 'form-error', hidden: true });
+  const name = el('input', { class: 'input', type: 'text', placeholder: 'My community', maxlength: 64, required: true });
+  const desc = el('textarea', { class: 'textarea', placeholder: 'What is your community about? (optional)', maxlength: 400 });
+  const joinCode = el('input', { class: 'input', type: 'text', placeholder: 'Public code (letters + numbers, optional)', maxlength: 32 });
+  const isPublic = el('input', { type: 'checkbox', checked: true });
+  const isDisc = el('input', { type: 'checkbox', checked: true });
+  const createBtn = el('button', { class: 'btn primary block', type: 'submit' }, 'Create server');
+
+  const form = el('form', {}, err,
+    el('div', { class: 'field' }, el('label', {}, 'Server name'), name),
+    el('div', { class: 'field' }, el('label', {}, 'Description'), desc),
+    el('div', { class: 'field' }, el('label', {}, 'Join code'), joinCode,
+      el('span', { class: 'hint' }, 'Leave blank to auto-generate one.')),
+    el('div', { class: 'field' }, el('label', { class: 'switch' }, isPublic, ' Public — joinable by code or invite link')),
+    el('div', { class: 'field' }, el('label', { class: 'switch' }, isDisc, ' Discoverable in the browse feed')),
+    createBtn);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    createBtn.setAttribute('aria-busy', 'true');
+    try {
+      const res = await Api.createServer({
+        name: name.value.trim(),
+        description: desc.value.trim() || undefined,
+        joinCode: joinCode.value.trim() || undefined,
+        isPublic: isPublic.checked,
+        isDiscoverable: isDisc.checked,
+      });
+      toast('Server created!', 'ok');
+      await refreshServers();
+      const sid = res.serverId;
+      location.hash = '#/server/' + sid + '/channel/' + res.channelId;
+    } catch (ex) {
+      err.hidden = false;
+      err.textContent = ex.message || 'Failed';
+    } finally {
+      createBtn.removeAttribute('aria-busy');
+    }
+  });
+
+  card.appendChild(el('h1', {}, 'Create a server'));
+  card.appendChild(el('p', { class: 'auth-sub' }, 'A permanent place for your community to gather.'));
+  card.appendChild(form);
+  wrap.appendChild(card);
+  container.appendChild(wrap);
+}
+
+export default {
+  renderServerLanding,
+  renderChannel,
+  renderNewChannel,
+  renderInvites,
+  renderServerSettings,
+  renderServerMembers,
+  renderServerRoles,
+  renderServerCategories,
+  renderNewServer,
+};

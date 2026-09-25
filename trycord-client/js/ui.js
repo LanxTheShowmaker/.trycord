@@ -1,289 +1,226 @@
-/* UI primitives: escaping, toasts, modal/dialog, states, avatar, time. */
-(function () {
-  function esc(s) {
-    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-    })[c]);
-  }
+// Low-level UI primitives: DOM helpers, escaping, toasts, modals,
+// popovers, and time formatting. Framework-free.
 
-  function toast(message, type) {
-    var root = document.getElementById('toasts');
-    var el = document.createElement('div');
-    el.className = 'toast ' + (type || 'info');
-    el.setAttribute('role', 'status');
-    var span = document.createElement('span');
-    span.textContent = message;
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'icon-btn';
-    btn.setAttribute('aria-label', 'Dismiss');
-    btn.textContent = '✕';
-    btn.onclick = () => el.remove();
-    el.append(span, btn);
-    root.appendChild(el);
-    setTimeout(() => { if (el.isConnected) el.remove(); }, 5000);
-  }
+import { TrycordConfig } from './config.js';
 
-  function openModal(opts) {
-    var root = document.getElementById('modal-root');
-    root.innerHTML = '';
-    var scrim = document.createElement('div');
-    scrim.className = 'modal-scrim';
-    var box = document.createElement('div');
-    box.className = 'modal';
-    box.setAttribute('role', 'dialog');
-    box.setAttribute('aria-modal', 'true');
-    box.setAttribute('aria-label', opts.title || 'Dialog');
-    var head = document.createElement('div');
-    head.className = 'modal-head';
-    var h2 = document.createElement('h2');
-    h2.textContent = opts.title || '';
-    head.appendChild(h2);
-    var body = document.createElement('div');
-    body.className = 'modal-body';
-    if (typeof opts.body === 'string') body.innerHTML = opts.body;
-    else if (opts.body) body.appendChild(opts.body);
-    var foot = document.createElement('div');
-    foot.className = 'modal-foot';
-    function close() {
-      root.innerHTML = '';
-      document.removeEventListener('keydown', onKey);
-      if (opts.onClose) opts.onClose();
+export function esc(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+export function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v == null) continue;
+      if (k === 'class') node.className = v;
+      else if (k === 'style' && typeof v === 'object') Object.assign(node.style, v);
+      else if (k === 'html') node.innerHTML = v;
+      else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (k === 'dataset') Object.assign(node.dataset, v);
+      else if (v === true) node.setAttribute(k, '');
+      else if (k in node && k !== 'value' && k !== 'type') { try { node[k] = v; } catch { node.setAttribute(k, v); } }
+      else node.setAttribute(k, v);
     }
-    function onKey(e) { if (e.key === 'Escape') close(); }
-    (opts.actions || [{ id: 'ok', label: 'OK', primary: true }]).forEach((a) => {
-      var b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'btn' + (a.primary ? ' btn-primary' : '') + (a.danger ? ' btn-danger' : '');
-      if (a.id) b.dataset.action = a.id;
-      b.textContent = a.label;
-      b.onclick = () => {
-        if (a.onClick) a.onClick(close, { primary: foot.querySelector('.btn-primary'), all: foot });
-        else close();
-      };
-      foot.appendChild(b);
-      if (a.primary) setTimeout(() => b.focus(), 0);
+  }
+  for (const c of children.flat(Infinity)) {
+    if (c == null) continue;
+    node.append(c.nodeType ? c : document.createTextNode(String(c)));
+  }
+  return node;
+}
+
+export function clear(node) {
+  while (node && node.firstChild) node.removeChild(node.firstChild);
+  return node;
+}
+
+export function qs(sel, root = document) { return root.querySelector(sel); }
+export function qsa(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
+
+// ---- toasts -----------------------------------------------------------
+
+export function toast(message, kind = 'info', timeout = 4200) {
+  const root = qs('#toast-root');
+  if (!root) return;
+  const t = el('div', { class: 'toast ' + kind, role: 'status' }, message);
+  root.appendChild(t);
+  setTimeout(() => {
+    t.style.opacity = '0';
+    t.style.transition = 'opacity 240ms';
+    setTimeout(() => t.remove(), 260);
+  }, timeout);
+}
+
+// ---- modals --------------------------------------------------------------
+
+export function openModal({ title, body, footer, closeText = 'Close' }) {
+  let box;
+  const backdrop = el('div', { class: 'backdrop' }, (box = el('div', {
+    class: 'modal',
+    role: 'dialog',
+    'aria-modal': 'true',
+  })));
+  const titleId = 'modal-title-' + Math.random().toString(36).slice(2, 8);
+  if (title) {
+    box.setAttribute('aria-labelledby', titleId);
+    box.appendChild(el('h2', { id: titleId }, title));
+  } else {
+    box.setAttribute('aria-label', 'Dialog');
+  }
+  if (body) box.appendChild(el('div', {}, body));
+  if (footer) box.appendChild(el('div', { class: 'row-line', style: { marginTop: 'var(--t-d-4)', justifyContent: 'flex-end' } }, footer));
+
+  const prevFocus = document.activeElement;
+
+  function focusables() {
+    return Array.from(box.querySelectorAll(
+      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+      .filter((n) => n.offsetParent !== null || n === document.activeElement);
+  }
+
+  function close() {
+    backdrop.remove();
+    document.removeEventListener('keydown', onKey);
+    if (prevFocus && prevFocus !== document.body && typeof prevFocus.focus === 'function') {
+      try { prevFocus.focus(); } catch { /* ignore */ }
+    }
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') { close(); return; }
+    if (e.key === 'Tab') {
+      const f = focusables();
+      if (!f.length) { e.preventDefault(); return; }
+      const first = f[0];
+      const last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  }
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  document.addEventListener('keydown', onKey);
+  (qs('#modal-root') || document.body).appendChild(backdrop);
+  const first = box.querySelector('input, button, textarea, select, [tabindex]');
+  if (first) setTimeout(() => first.focus(), 30);
+  else { box.tabIndex = -1; setTimeout(() => box.focus(), 30); }
+  return { close, box };
+}
+
+export function confirmDialog({ title, message, confirmText = 'Confirm', danger = false, onConfirm }) {
+  let doClose = () => {};
+  const cancelBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Cancel');
+  const okBtn = el('button', { class: danger ? 'btn danger' : 'btn primary', type: 'button' }, confirmText);
+  const modal = openModal({
+    title, body: el('p', {}, message),
+    footer: [cancelBtn, okBtn],
+  });
+  doClose = modal.close;
+  cancelBtn.addEventListener('click', doClose);
+  okBtn.addEventListener('click', async () => {
+    try { await onConfirm(); } finally { doClose(); }
+  });
+  return modal;
+}
+
+// ---- popovers -----------------------------------------------------------
+
+export function showPopover(anchor, items, { onSelect } = {}) {
+  const root = qs('#popover-root') || document.body;
+  const pop = el('div', { class: 'popover', hidden: true });
+  for (const item of items || []) {
+    if (item.sep) { pop.appendChild(el('div', { class: 'pop-sep' })); continue; }
+    const b = el('button', { class: 'pop-item ' + (item.danger ? 'danger' : '') }, (() => {
+      if (item.html) return item.html();
+      const wrap = el('span', {});
+      wrap.append(el('span', {}, item.label));
+      if (item.desc) wrap.append(el('span', { class: 'pop-desc' }, item.desc));
+      return wrap;
+    })());
+    b.addEventListener('click', () => {
+      hidePopover();
+      if (onSelect) onSelect(item);
+      else if (item.onClick) item.onClick();
     });
-    scrim.addEventListener('mousedown', (e) => { if (e.target === scrim) close(); });
+    pop.appendChild(b);
+  }
+  root.appendChild(pop);
+  // position
+  const r = anchor.getBoundingClientRect();
+  pop.removeAttribute('hidden');
+  const pr = pop.getBoundingClientRect();
+  let left = r.left;
+  let top = r.bottom + 6;
+  if (left + pr.width > innerWidth - 8) left = innerWidth - pr.width - 8;
+  if (top + pr.height > innerHeight - 8) top = Math.max(8, r.top - pr.height - 6);
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+  function hide(e) {
+    if (e && pop.contains(e.target)) return;
+    hidePopover();
+  }
+  function hidePopover() {
+    pop.remove();
+    document.removeEventListener('pointerdown', hide);
+    document.removeEventListener('keydown', onKey);
+    if (pop.contains(document.activeElement) && anchor && typeof anchor.focus === 'function') {
+      try { anchor.focus(); } catch { /* ignore */ }
+    }
+  }
+  function onKey(e) { if (e.key === 'Escape') hidePopover(); }
+  setTimeout(() => {
+    document.addEventListener('pointerdown', hide);
     document.addEventListener('keydown', onKey);
-    box.append(head, body, foot);
-    scrim.appendChild(box);
-    root.appendChild(scrim);
-    return close;
-  }
+  }, 0);
+  return { pop, hide: hidePopover };
+}
 
-  function confirmDialog(opts) {
-    return new Promise((resolve) => {
-      var msg = document.createElement('p');
-      msg.textContent = opts.message || 'Are you sure?';
-      openModal({
-        title: opts.title || 'Confirm',
-        body: msg,
-        onClose: () => resolve(false),
-        actions: [
-          { id: 'cancel', label: opts.cancelText || 'Cancel' },
-          {
-            id: 'ok', label: opts.confirmText || 'Confirm', primary: !opts.danger, danger: !!opts.danger,
-            onClick: (close) => { close(); resolve(true); },
-          },
-        ],
-      });
-    });
-  }
+// ---- time -----------------------------------------------------------------
 
-  function skeletons(n, cls) {
-    var html = '';
-    for (var i = 0; i < (n || 3); i++) html += '<div class="skeleton"></div>';
-    return '<div class="' + (cls || 'stack') + '" aria-busy="true" aria-label="Loading">' + html + '</div>';
-  }
+export function relTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const s = (Date.now() - d.getTime()) / 1000;
+  if (s < 45) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  if (s < 604800) return Math.floor(s / 86400) + 'd';
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 
-  function emptyState(o) {
-    return (
-      '<div class="state" role="status">' +
-      '<div class="glyph" aria-hidden="true">' + (o.icon || '○') + '</div>' +
-      '<h3>' + esc(o.title || 'Nothing here yet') + '</h3>' +
-      '<p>' + esc(o.hint || '') + '</p>' +
-      '<div class="actions">' + (o.actions || '') + '</div></div>'
-    );
-  }
+export function fullTime(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+}
 
-  function errorState(message, retryLabel) {
-    return (
-      '<div class="state" role="alert">' +
-      '<div class="glyph" aria-hidden="true">⚠</div><h3>Something went wrong</h3>' +
-      '<p>' + esc(message || 'Request failed.') + '</p>' +
-      '<div class="actions"><button type="button" class="btn btn-primary" data-retry>' +
-      esc(retryLabel || 'Retry') + '</button></div></div>'
-    );
-  }
-
-  function avatarHtml(name, size) {
-    var n = String(name || '?').trim() || '?';
-    var hue = 0;
-    for (var i = 0; i < n.length; i++) hue = (hue * 31 + n.charCodeAt(i)) % 360;
-    return '<span class="avatar ' + (size || '') + '" aria-hidden="true" style="background:hsl(' +
-      hue + ',45%,42%)">' + esc(n[0].toUpperCase()) + '</span>';
-  }
-
-  function badge(text, kind) {
-    return '<span class="badge ' + (kind || '') + '">' + esc(text) + '</span>';
-  }
-
-  function timeAgo(iso) {
-    if (!iso) return 'never';
-    var t = new Date(iso).getTime();
-    if (isNaN(t)) return 'never';
-    var s = Math.max(0, (Date.now() - t) / 1000);
-    if (s < 60) return 'just now';
-    if (s < 3600) return Math.floor(s / 60) + 'm ago';
-    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-    if (s < 86400 * 7) return Math.floor(s / 86400) + 'd ago';
-    return new Date(t).toLocaleDateString();
-  }
-
-  function fullDate(iso) {
-    if (!iso) return '—';
-    var d = new Date(iso);
-    return isNaN(d) ? '—' : d.toLocaleString();
-  }
-
-  function fieldError(input, msg) {
-    input.setAttribute('aria-invalid', msg ? 'true' : 'false');
-    var err = input.parentElement.querySelector('.field-err');
-    if (!err) {
-      err = document.createElement('div');
-      err.className = 'field-err';
-      input.after(err);
-    }
-    err.textContent = msg || '';
-    return !msg;
-  }
-
-  function setLoading(btn, loading, label) {
-    if (!btn) return;
-    if (loading) {
-      btn.dataset.label = btn.innerHTML;
-      btn.disabled = true;
-      btn.innerHTML = esc(label || 'Working…');
-    } else {
-      btn.disabled = false;
-      if (btn.dataset.label) btn.innerHTML = btn.dataset.label;
-    }
-  }
-
-  function icon(name, cls) {
-    return '<svg class="icon ' + (cls || '') + '" aria-hidden="true"><use href="#i-' + name + '"></use></svg>';
-  }
-
-  // Context / dropdown menu. items: [{icon, label, hint?, danger?, disabled?, action?}]
-  // Returns a close fn. Esc + outside click close; first item autofocused.
-  function menu(anchor, items, opts) {
-    opts = opts || {};
-    closeMenu();
-    var m = document.createElement('div');
-    m.className = 'menu';
-    m.setAttribute('role', 'menu');
-    if (opts.label) {
-      var head = document.createElement('div');
-      head.className = 'menu-head';
-      head.textContent = opts.label;
-      m.appendChild(head);
-    }
-    var visible = items.filter((i) => !i.hidden);
-    visible.forEach((item, idx) => {
-      if (item.sep) {
-        var sep = document.createElement('div');
-        sep.className = 'menu-sep';
-        m.appendChild(sep);
-        return;
-      }
-      var b = document.createElement('button');
-      b.type = 'button';
-      b.setAttribute('role', 'menuitem');
-      if (item.danger) b.className = 'danger';
-      if (item.disabled) b.disabled = true;
-      b.innerHTML = (item.icon ? icon(item.icon) : '') + '<span></span>';
-      b.querySelector('span').textContent = item.label;
-      if (item.hint) {
-        var hint = document.createElement('small');
-        hint.className = 'muted';
-        hint.style.marginLeft = 'auto';
-        hint.textContent = item.hint;
-        b.appendChild(hint);
-      }
-      b.onclick = () => {
-        closeMenu();
-        if (item.action) item.action();
-      };
-      m.appendChild(b);
-      if (idx === 0) setTimeout(() => b.focus(), 0);
-    });
-    document.getElementById('menu-root').appendChild(m);
-    var r = anchor.getBoundingClientRect();
-    m.style.top = Math.min(window.innerHeight - m.offsetHeight - 8, r.bottom + 6) + 'px';
-    m.style.left = Math.max(8, Math.min(window.innerWidth - m.offsetWidth - 8, r.left)) + 'px';
-    function onKey(e) {
-      if (e.key === 'Escape') closeMenu();
-    }
-    function onDoc(e) {
-      if (!m.contains(e.target)) closeMenu();
-    }
-    document.addEventListener('keydown', onKey);
-    setTimeout(() => document.addEventListener('mousedown', onDoc), 0);
-    function closeMenu() {
-      if (m.isConnected) m.remove();
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onDoc);
-    }
-    m._close = closeMenu;
-    return closeMenu;
-  }
-
-  function closeMenu() {
-    document.querySelectorAll('#menu-root .menu').forEach((m) => {
-      if (m._close) m._close();
-      else m.remove();
-    });
-  }
-
-  // Backend/network errors -> contextual human copy. Never leaks internals.
-  function friendlyError(e, context) {
-    var code = (e && e.code) || '';
-    switch (code) {
-      case 'OFFLINE': return 'The Trycord server didn’t respond. Check that it’s running and reachable.';
-      case 'SESSION_REVOKED':
-      case 'AUTH_REQUIRED': return 'Your session expired. Please log in again.';
-      case 'NOT_A_MEMBER': return 'You’re not a member of this server.';
-      case 'PERMISSION_DENIED': return 'You don’t have permission to do that here.';
-      case 'SERVER_PRIVATE': return 'This server is private — you need an invite.';
-      case 'SERVER_NOT_FOUND': return 'That server doesn’t exist (or is private).';
-      case 'INVITE_INVALID': return 'Invite not found. Check the code and try again.';
-      case 'INVITE_EXPIRED': return 'That invite has expired.';
-      case 'INVITE_EXHAUSTED': return 'That invite has no uses left.';
-      case 'INVITE_REVOKED': return 'That invite was revoked.';
-      case 'ALREADY_MEMBER': return 'You’re already a member.';
-      case 'VALIDATION_ERROR': return (e && e.message) || 'Please check your input and try again.';
-      default:
-        if (context === 'server') return 'Couldn’t load this server. The Trycord server didn’t respond.';
-        if (context === 'messages') return 'Couldn’t load messages. Try again in a moment.';
-        return (e && e.message) || 'Something went wrong. Please retry.';
-    }
-  }
-
-  function dayLabel(iso) {
-    var d = new Date(iso);
-    if (isNaN(d)) return '';
-    var today = new Date();
-    var yesterday = new Date(Date.now() - 86400000);
-    var sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-    if (sameDay(d, today)) return 'Today';
-    if (sameDay(d, yesterday)) return 'Yesterday';
-    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
-  }
-
-  window.TrycordUi = {
-    esc, toast, openModal, confirmDialog, skeletons,
-    emptyState, errorState, avatarHtml, badge, timeAgo, fullDate,
-    fieldError, setLoading, icon, menu, closeMenu, friendlyError, dayLabel,
+export function mentionify(text, meUsername, meId) {
+  // Highlight @mentions and @me so the client can act on mentions.
+  // Pure presentation; no markdown engine. Also linkify bare URLs.
+  let out = esc(text);
+  const fmtMention = (m0, name) => {
+    const mine = name === meUsername || name === meId;
+    return '<span class="msg-mention">' + esc(m0) + '</span>';
   };
-})();
+  if (meUsername || meId) {
+    out = out.replace(/@((?:[A-Za-z0-9_.]{2,32})|me|Me)/g, fmtMention);
+  }
+  out = out.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+  out = out.replace(/\n/g, '<br>');
+  return out;
+}
+
+// ---- api base for attachment src ----------------------------------
+
+export function apiSrc(path) {
+  if (!path) return '';
+  if (/^https?:\/\//i.test(path)) return path;
+  return TrycordConfig.apiUrl().replace(/\/+$/, '') + path;
+}
+
+export default { esc, el, clear, toast, openModal, confirmDialog, showPopover, relTime, fullTime, mentionify, apiSrc };

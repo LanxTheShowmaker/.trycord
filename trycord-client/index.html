@@ -1,148 +1,303 @@
-<!DOCTYPE html>
-<html lang="en" data-theme="dark" data-density="comfortable">
+<!doctype html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>.trycord</title>
-  <link rel="stylesheet" href="styles/main.css" />
-  <link rel="stylesheet" href="styles/layout.css" />
-  <link rel="stylesheet" href="styles/components.css" />
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  >
+
+  <meta
+    name="description"
+    content="Trycord communication client"
+  >
+
+  <!-- Content Security Policy. Covers both browser (server-rendered, which
+       also sends its own header — policies intersect) and the desktop
+       Electron build loading this page from file://. 'self' covers the
+       local client; connect-src permits the configured API/WebSocket
+       backend; blob: is required for attachment previews. -->
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self';
+             img-src 'self' data: blob: http: https:;
+             media-src 'self' blob: http: https:;
+             font-src 'self' data:;
+             connect-src 'self' http: https: ws: wss:;
+             worker-src 'self' blob:;
+             object-src 'none'; frame-src 'none';
+             base-uri 'self'; form-action 'self'"
+  >
+
+  <title>Trycord</title>
+
+  <!-- Brand logo -->
+  <link rel="icon" href="./assets/trycord-logo.ico" type="image/x-icon">
+  <link rel="icon" href="./assets/trycord-logo.png" type="image/png">
+  <link rel="apple-touch-icon" href="./assets/trycord-logo.png">
+
+  <!-- Application stylesheet -->
+  <link rel="stylesheet" href="./css/app.css">
 </head>
+
 <body>
-  <a class="skip-link" href="#view">Skip to content</a>
+  <!-- Keyboard accessibility -->
+  <a class="skip-link" href="#trycord-main">
+    Skip to main content
+  </a>
 
-  <!-- Consistent Trycord icon set: 24px grid, 1.8px stroke, currentColor -->
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <defs>
-      <symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/><path d="M10 20v-5h4v5"/></symbol>
-      <symbol id="i-compass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/></symbol>
-      <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></symbol>
-      <symbol id="i-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l2.3 4.9 5.2.6-3.9 3.6 1 5.2-4.6-2.6-4.6 2.6 1-5.2-3.9-3.6 5.2-.6z"/></symbol>
-      <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
-      <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
-      <symbol id="i-hash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 4L7 20M17 4l-2 16M4.5 9h16M3.5 15h16"/></symbol>
-      <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5"/><circle cx="16.5" cy="9" r="2.4"/><path d="M15.5 14.6c2.9.1 4.5 1.6 5 4.4"/></symbol>
-      <symbol id="i-cog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></symbol>
-      <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8L20.5 20.5"/></symbol>
-      <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 10a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5h-15S6 14 6 10"/><path d="M10 19a2.2 2.2 0 0 0 4 0"/></symbol>
-      <symbol id="i-bell-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 10a6 6 0 0 1 10.5-4M18 10c0 4 1.5 5.5 1.5 5.5h-15S5 14 5.5 12M10 19a2.2 2.2 0 0 0 4 0"/><path d="M4 4l16 16"/></symbol>
-      <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></symbol>
-      <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5 10-11"/></symbol>
-      <symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></symbol>
-      <symbol id="i-dots" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></symbol>
-      <symbol id="i-out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h5v16h-5M10 8l4 4-4 4M14 12H3"/></symbol>
-      <symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4L10 14M20 4l-7 17-3-7-7-3z"/></symbol>
-      <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 3v6c0 4.5-3.2 7.6-7.5 9-4.3-1.4-7.5-4.5-7.5-9V6z"/><path d="M9.5 12l2 2 3.5-4"/></symbol>
-      <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1.5 1.5M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1.5-1.5"/></symbol>
-      <symbol id="i-pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 0 1 3 3L8 19z"/><path d="M14.5 6.5l3 3"/></symbol>
-      <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6.5 7l1 13h9l1-13M10 11v6M14 11v6"/></symbol>
-      <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></symbol>
-      <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 7.8v.3"/></symbol>
-      <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
-      <symbol id="i-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></symbol>
-      <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
-      <symbol id="i-mail" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 7l8.5 6 8.5-6"/></symbol>
-    </defs>
-  </svg>
+  <!--
+    ============================================================
+    TRYCORD APPLICATION
+    ============================================================
 
-  <div id="offline-banner" class="offline-banner" hidden role="status">
-    <span class="dot dot-warn" aria-hidden="true"></span>
-    <span id="offline-text">Server unreachable.</span>
-    <button id="retry-link" type="button" class="btn btn-ghost btn-sm">Retry</button>
-  </div>
+    IMPORTANT:
 
-  <!-- Public shell: landing + auth -->
-  <div id="shell-public" hidden>
-    <header class="public-top">
-      <a class="brand" href="#/" aria-label="Trycord home">
-        <span class="brand-mark" aria-hidden="true">t</span><span class="brand-name">trycord</span>
-      </a>
-      <nav class="public-nav" aria-label="Public">
-        <a href="#/login" class="btn btn-ghost" data-auth-link="login">Log in</a>
-        <a href="#/register" class="btn btn-primary" data-auth-link="register">Sign up</a>
-      </nav>
-    </header>
-    <main id="view-public" class="public-main" tabindex="-1"></main>
-    <footer class="public-foot">Trycord — self-hosted community chat.</footer>
-  </div>
+    This is the APPLICATION shell.
 
-  <!-- App shell: rail + server nav + workspace + member panel + account -->
-  <div id="shell-app" hidden>
-    <div class="app-grid">
-      <nav id="rail" class="rail" aria-label="Global">
-        <div class="rail-group">
-          <button type="button" class="rail-btn rail-logo" data-nav="#/home" title="Trycord home" aria-label="Trycord home">
-            <span class="brand-mark" aria-hidden="true">t</span>
-          </button>
-          <div class="rail-sep" aria-hidden="true"></div>
-          <div id="rail-nav"></div>
-        </div>
-        <div class="rail-servers" id="rail-servers" aria-label="Your servers"></div>
-        <div class="rail-foot">
-          <button type="button" class="rail-btn" id="rail-add" title="Create or join a server" aria-label="Create or join a server"></button>
-          <button type="button" class="rail-avatar" id="rail-account" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu">
-            <span id="rail-avatar-img"></span>
-            <span id="rail-status" class="status-dot" aria-hidden="true"></span>
-          </button>
-        </div>
-      </nav>
+    This is NOT:
+    - the public landing page
+    - a dashboard
+    - a marketing page
+    - a static documentation page
 
-      <aside id="server-nav" class="server-nav" aria-label="Server navigation" hidden>
-        <div id="server-nav-body"></div>
+    Do not populate this HTML with mock users, communities,
+    channels, messages, or other application data.
+
+    JavaScript must populate these regions from the real
+    application state/API/WebSocket system.
+  -->
+
+  <div id="app" class="trycord-app">
+
+    <!-- ======================================================
+         MOBILE SHELL
+         ====================================================== -->
+
+    <section
+      id="mobile-shell"
+      class="shell shell--mobile"
+      aria-label="Trycord mobile application"
+      hidden
+    >
+      <header class="mobile-header">
+        <button
+          id="mobile-nav-toggle"
+          type="button"
+          aria-label="Open navigation"
+          aria-controls="mobile-navigation"
+          aria-expanded="false"
+        >
+          <span aria-hidden="true">☰</span>
+        </button>
+
+        <div
+          id="mobile-context"
+          class="mobile-context"
+        ></div>
+
+        <button
+          id="mobile-actions"
+          type="button"
+          aria-label="Open actions"
+        >
+          <span aria-hidden="true">•••</span>
+        </button>
+      </header>
+
+      <aside
+        id="mobile-navigation"
+        class="mobile-navigation"
+        aria-label="Trycord navigation"
+        hidden
+      ></aside>
+
+      <div
+        id="mobile-backdrop"
+        class="mobile-backdrop"
+        aria-hidden="true"
+      ></div>
+
+      <main
+        id="mobile-main"
+        class="mobile-main"
+      ></main>
+
+      <nav
+        id="mobile-tab-navigation"
+        class="mobile-tab-navigation"
+        aria-label="Primary navigation"
+      ></nav>
+    </section>
+
+
+    <!-- ======================================================
+         DESKTOP SHELL
+         ====================================================== -->
+
+    <section
+      id="desktop-shell"
+      class="shell shell--desktop"
+      aria-label="Trycord desktop application"
+      hidden
+    >
+
+      <!-- ====================================================
+           PRESENCE SPINE
+
+           This is NOT an icon rail.
+
+           It is the persistent spatial navigation environment.
+           ==================================================== -->
+
+      <aside
+        id="presence-spine"
+        class="presence-spine"
+        aria-label="Trycord navigation"
+      >
+
+        <!-- Authenticated user's real identity -->
+        <header
+          id="identity-region"
+          class="presence-spine__identity"
+        ></header>
+
+        <!-- Global destinations:
+             Home / DMs / other real application destinations -->
+        <nav
+          id="global-navigation"
+          class="presence-spine__global-navigation"
+          aria-label="Global navigation"
+        ></nav>
+
+        <!-- Real communities belonging to the authenticated user -->
+        <section
+          id="community-navigation"
+          class="presence-spine__communities"
+          aria-label="Communities"
+        ></section>
+
+        <!-- Contextual navigation for the currently selected
+             community/place -->
+        <section
+          id="place-navigation"
+          class="presence-spine__place-navigation"
+          aria-label="Current place navigation"
+        ></section>
+
       </aside>
 
-      <div class="app-main">
-        <header class="contextbar">
-          <button id="nav-toggle" type="button" class="icon-btn only-mobile" aria-label="Open navigation" aria-expanded="false"></button>
-          <button id="back-btn" type="button" class="icon-btn only-mobile" aria-label="Back" hidden></button>
-          <div class="topbar-title">
-            <h1 id="page-title">Home</h1>
-            <p id="page-sub" class="muted"></p>
-          </div>
-          <div class="topbar-right">
-            <button id="palette-btn" type="button" class="icon-btn" title="Quick switcher (Ctrl+K)" aria-label="Quick switcher"></button>
-            <button id="panel-toggle" type="button" class="icon-btn" title="Toggle member panel" aria-label="Toggle member panel" aria-expanded="true" hidden></button>
-            <span id="conn-pill" class="pill" role="status"><span class="dot" aria-hidden="true"></span><span id="conn-text">Checking…</span></span>
-            <button id="avatar-btn" type="button" class="avatar-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu"></button>
-          </div>
-        </header>
-        <main id="view" class="view" tabindex="-1"></main>
-        <div id="account-bar" class="account-bar">
-          <span id="account-avatar"></span>
-          <span class="account-id">
-            <strong id="account-name">–</strong>
-            <small id="account-sub" class="muted">–</small>
-          </span>
-          <button id="account-theme" type="button" class="icon-btn" title="Toggle theme" aria-label="Toggle theme"></button>
-          <button id="account-settings" type="button" class="icon-btn" title="Settings" aria-label="Settings"></button>
-        </div>
-      </div>
 
-      <aside id="member-panel" class="member-panel" aria-label="Members and info" hidden>
-        <div id="member-panel-body"></div>
-      </aside>
-    </div>
-    <nav id="mobilebar" class="mobilebar" aria-label="Global"></nav>
+      <!-- ====================================================
+           MAIN ENVIRONMENT / ATRIUM
+           ==================================================== -->
+
+      <main
+        id="trycord-main"
+        class="main-environment"
+      >
+
+        <!--
+          Context belongs INSIDE the environment.
+
+          This is not a permanent application-wide top bar.
+          It changes according to the current place.
+        -->
+        <header
+          id="context-header"
+          class="context-header"
+        ></header>
+
+        <!--
+          Primary application viewport.
+
+          JavaScript renders the currently active real
+          application surface here.
+        -->
+        <div class="chat-environment">
+          <section
+            id="view-root"
+            class="view-root"
+            aria-live="polite"
+          ></section>
+
+          <aside
+            id="member-sidebar"
+            class="member-sidebar"
+            aria-label="Community members"
+          ></aside>
+        </div>
+
+      </main>
+
+    </section>
+
+
+    <!-- ======================================================
+         GLOBAL OVERLAYS
+         ======================================================
+
+         These are intentionally outside the shells so they can
+         be used by both desktop and mobile.
+    -->
+
+    <div
+      id="modal-root"
+      class="modal-root"
+      aria-live="assertive"
+    ></div>
+
+    <div
+      id="popover-root"
+      class="popover-root"
+    ></div>
+
+    <div
+      id="toast-root"
+      class="toast-root"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+
+
+    <!-- ======================================================
+         APPLICATION STATUS
+         ====================================================== -->
+
+    <div
+      id="connection-status"
+      class="connection-status"
+      role="status"
+      aria-live="polite"
+    ></div>
+
   </div>
 
-  <div id="palette-root"></div>
-  <div id="menu-root"></div>
-  <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
-  <div id="modal-root"></div>
 
-  <script src="config.js"></script>
-  <script src="/runtime-config.js"></script>
-  <script src="js/api.js"></script>
-  <script src="js/state.js"></script>
-  <script src="js/global-sync.js"></script>
-  <script src="js/ui.js"></script>
-  <script src="js/components.js"></script>
-  <script src="js/pages-public.js"></script>
-  <script src="js/pages-home.js"></script>
-  <script src="js/pages-browse.js"></script>
-  <script src="js/pages-workspace.js"></script>
-  <script src="js/pages-account.js"></script>
-  <script src="js/router.js"></script>
-  <script src="js/app.js"></script>
+  <!--
+    ============================================================
+    APPLICATION JAVASCRIPT
+    ============================================================
+
+    Keep application logic in JS modules.
+
+    The HTML above is the structural shell only.
+
+    Do not put:
+    - fake data
+    - example communities
+    - example messages
+    - fake users
+    - fake channels
+    - fake API responses
+
+    into this document.
+  -->
+
+  <!-- Crash surface: if a module fails to load (stale cache mixing during
+       live development), show an actionable message instead of a blank window. -->
+  <script src="./js/crash.js"></script>
+  <script type="module" src="./js/app.js"></script>
 </body>
 </html>
