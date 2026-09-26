@@ -256,6 +256,29 @@ export function renderPlaceNavigation(region) {
 
   if (!channels.length) region.appendChild(el('div', { class: 'place-empty compact' }, 'No channels yet.'));
 
+  // Server management section (merged nav): the per-page button bars are
+  // gone — these links live in the Discord-style sidebar with an active
+  // state, so every management surface is one click away from anywhere.
+  const manage = el('section', { class: 'channel-section' });
+  manage.appendChild(el('div', { class: 'channel-section__title' }, el('span', {}, 'Server settings')));
+  const manageList = el('div', { class: 'channel-section__list' });
+  const manageLinks = [
+    { label: 'General', icon: '⚙', href: '#/server/' + sid + '/settings', path: '/server/' + sid + '/settings' },
+    { label: 'Members', icon: '👥', href: '#/server/' + sid + '/members', path: '/server/' + sid + '/members' },
+    { label: 'Roles', icon: '🏷', href: '#/server/' + sid + '/roles', path: '/server/' + sid + '/roles' },
+    { label: 'Categories', icon: '≡', href: '#/server/' + sid + '/categories', path: '/server/' + sid + '/categories' },
+    { label: 'Invites', icon: '✉', href: '#/server/' + sid + '/invites', path: '/server/' + sid + '/invites' },
+  ];
+  for (const m of manageLinks) {
+    manageList.appendChild(navRow({
+      label: m.label, icon: m.icon, href: m.href,
+      active: route === m.path || route.startsWith(m.path + '/'),
+      onClick: () => { location.hash = m.href; },
+    }));
+  }
+  manage.appendChild(manageList);
+  region.appendChild(manage);
+
   // Session footer (reference sidebar-user pattern): live identity with a
   // settings shortcut. Additive only — identity-region stays untouched.
   const me = State.me;
@@ -604,6 +627,48 @@ export function renderAllChrome() {
   renderMobileTabs(qs('#mobile-tab-navigation'));
   syncMobileNavigation(qs('#mobile-navigation'));
   renderMemberSidebar(qs('#member-sidebar'));
+  renderVerifyBanner();
 }
 
-export default { renderAllChrome, renderContextHeader, renderIdentity, renderGlobalNavigation, renderCommunities, renderPlaceNavigation, renderMemberSidebar, renderMobileHeader, renderMobileTabs, syncMobileNavigation, setNavRoute, membersHidden, toggleMembers, DESTINATIONS };
+// Email-verification notice (UX only — the backend is the authority).
+// Shows in both shells while the session is unverified, with resend or
+// add-email paths. Disappears on the next chrome paint after verify.
+export function renderVerifyBanner() {
+  const me = State.me;
+  const show = !!(isAuthed() && me && !me.emailVerified);
+  for (const shell of [qs('#trycord-main'), qs('#mobile-shell')]) {
+    if (!shell) continue;
+    let bar = shell.querySelector(':scope > .verify-banner');
+    if (!show) {
+      if (bar) bar.remove();
+      continue;
+    }
+    if (!bar) {
+      bar = el('div', { class: 'verify-banner', role: 'status' });
+      shell.prepend(bar);
+    } else {
+      clear(bar);
+    }
+    const hasEmail = !!(me && me.email);
+    bar.appendChild(el('span', { class: 'verify-banner__text' }, hasEmail
+      ? 'Verify your email to unlock messaging.'
+      : 'Add an email address to verify your account.'));
+    if (hasEmail) {
+      const resend = el('button', { class: 'btn sm', type: 'button' }, 'Resend email');
+      resend.addEventListener('click', async () => {
+        resend.disabled = true;
+        try {
+          await Api.verifyEmailResend({ email: me.email });
+          toast('Verification email sent.', 'ok');
+        } catch (ex) { toast(ex.message || 'Could not resend.', 'error'); }
+        finally { resend.disabled = false; }
+      });
+      bar.appendChild(resend);
+    }
+    const go = el('button', { class: 'btn ghost sm', type: 'button' }, hasEmail ? 'Settings' : 'Add email');
+    go.addEventListener('click', () => { location.hash = '#/settings'; });
+    bar.appendChild(go);
+  }
+}
+
+export default { renderAllChrome, renderVerifyBanner, renderContextHeader, renderIdentity, renderGlobalNavigation, renderCommunities, renderPlaceNavigation, renderMemberSidebar, renderMobileHeader, renderMobileTabs, syncMobileNavigation, setNavRoute, membersHidden, toggleMembers, DESTINATIONS };
