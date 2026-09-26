@@ -12,8 +12,6 @@ import Realtime from './realtime.js';
 
 function accountTabs(active) {
   const tabs = el('div', { class: 'settings-nav' });
-  // Only sections that actually exist. Legacy password/sessions routes
-  // highlight Security — they render the same page.
   const items = [
     { id: 'profile', label: 'My Account', href: '#/settings', match: ['profile'] },
     { id: 'security', label: 'Security', href: '#/settings/security', match: ['security', 'password', 'sessions'] },
@@ -241,7 +239,7 @@ function renderProfileEditor(wrap) {
     value: (me && me.statusText) || '',
   });
 
-  const profileCard = el('div', { class: 'auth-box' });
+  const profileCard = el('div', { class: 'profile-editor' });
 
   // ---- live preview card (banner + avatar + name + bio + status) -------
   const bannerBox = el('div', { class: 'prof-banner' });
@@ -342,7 +340,7 @@ function renderProfileEditor(wrap) {
     } catch (ex) { toast(ex.message || 'Failed', 'error'); }
   });
 
-  profileCard.appendChild(el('div', { class: 'section-label' }, 'Picture'));
+  profileCard.appendChild(el('div', { class: 'section-label' }, 'Profile picture'));
   profileCard.appendChild(el('div', { class: 'row-line' }, avatarBtn, avatarRm, bannerBtn, bannerRm));
   profileCard.appendChild(avatarInput);
   profileCard.appendChild(bannerInput);
@@ -378,6 +376,7 @@ function renderProfileEditor(wrap) {
   profileCard.appendChild(form);
 
   // ---- email + verification status ----
+  profileCard.appendChild(el('div', { class: 'section-label' }, 'Account email'));
   const emailBox = el('div', { class: 'field' });
   emailBox.appendChild(el('label', {}, 'Email'));
   const emailLine = el('div', { class: 'muted small' });
@@ -457,7 +456,7 @@ function renderUpdates(wrap) {
   wrap.appendChild(el('div', { class: 'section-label' }, 'Application'));
 
   if (!desk) {
-    const box = el('div', { class: 'auth-box' });
+    const box = el('div', { class: 'card card--auth' });
     box.appendChild(el('p', {}, 'You are running Trycord in a browser. The browser build does not auto-update.'));
     box.appendChild(el('p', { class: 'muted small' }, 'The desktop app checks for and installs updates automatically.'));
     wrap.appendChild(el('div', {},
@@ -532,7 +531,7 @@ function renderPasswordSection(wrap, container, tab) {
   const cur = el('input', { class: 'input', type: 'password', autocomplete: 'current-password', required: true });
   const next = el('input', { class: 'input', type: 'password', autocomplete: 'new-password', minlength: 8, required: true });
   const submit = el('button', { class: 'btn primary', type: 'submit' }, 'Change password');
-  const form = el('form', { class: 'auth-box' }, err,
+  const form = el('form', { class: 'card card--auth' }, err,
     el('div', { class: 'field' }, el('label', {}, 'Current password'), cur),
     el('div', { class: 'field' }, el('label', {}, 'New password'), next,
       el('span', { class: 'hint' }, '8+ characters. All other sessions will be signed out.')),
@@ -621,7 +620,7 @@ export async function renderAccount(container, { tab = 'profile' } = {}) {
   } else if (tab === 'backend') {
     body.appendChild(el('div', { class: 'section-label' }, 'Backend'));
     body.appendChild(el('p', { class: 'muted small' }, 'Choose which Trycord server this app talks to. Switching servers signs you out here first.'));
-    const backendBox = el('div', { class: 'auth-box' });
+    const backendBox = el('div', { class: 'card card--auth' });
     renderBackendSelector(backendBox);
     body.appendChild(backendBox);
   } else {
