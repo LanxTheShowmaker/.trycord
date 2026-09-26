@@ -5,18 +5,13 @@
 // brute-force probing of ids slow. Genuine holders can re-appeal after a
 // denial, so the limit is per-IP headroom rather than a single attempt.
 const express = require('express');
-<<<<<<< HEAD
-=======
 const auth = require('../middleware/auth');
->>>>>>> main
 const rateLimit = require('../middleware/ratelimit');
 const { serviceError } = require('../errors');
 const ts = require('../services/trustsafety');
 
 const router = express.Router();
 
-<<<<<<< HEAD
-=======
 // Own appeals for signed-in users. Scoped by auth identity — the anonymous
 // POST below stays anonymous; this never lists anyone else's appeals.
 router.get('/mine', auth, async (req, res, next) => {
@@ -25,7 +20,6 @@ router.get('/mine', auth, async (req, res, next) => {
   } catch (e) { serviceError(res, e); }
 });
 
->>>>>>> main
 router.post('/', rateLimit({ windowMs: 60000, max: 10 }), async (req, res, next) => {
   try {
     res.status(201).json(await ts.submitAppeal(req.body || {}));

@@ -145,8 +145,6 @@ async function boot() {
   const addCspOrigin = (o) => {
     try { const origin = new URL(o).origin; cspConnect.push(origin, origin.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:')); cspImg.push(origin); } catch { /* ignore unparseable */ }
   };
-<<<<<<< HEAD
-=======
   // Reduce a candidate to a bare origin string (scheme + host + port) or
   // null. Origins cannot carry spaces, quotes, or semicolons, so the
   // result is always safe to interpolate into the CSP header.
@@ -158,29 +156,10 @@ async function boot() {
     } catch { return null; }
   };
   const wsOriginOf = (origin) => origin.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
->>>>>>> main
   [apiOrigin, inst.publicUrl, inst.globalUrl].forEach((o) => o && addCspOrigin(o));
   ['http://localhost:9971', 'http://127.0.0.1:9971', 'https://trycord.dev'].forEach(addCspOrigin);
   String(process.env.CSP_CONNECT_ORIGINS || '')
     .split(',').map((s) => s.trim()).filter(Boolean).forEach(addCspOrigin);
-<<<<<<< HEAD
-  const buildCsp = (allowInlineScripts) => [
-    "default-src 'self'",
-    `connect-src ${[...new Set(cspConnect)].join(' ')}`,
-    allowInlineScripts ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    `img-src ${[...new Set(cspImg)].join(' ')}`,
-    "font-src 'self' data:",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    "frame-ancestors 'none'",
-  ].join('; ');
-  const appCsp = buildCsp(false);
-  const showcaseCsp = buildCsp(true);
-  app.use((req, res, next) => {
-    res.setHeader('Content-Security-Policy', req.path.indexOf('showcase') !== -1 ? showcaseCsp : appCsp);
-=======
   // The served client's own static pin (backend.json) is part of the
   // centralized backend configuration: allow it once the client directory
   // is located below. Self-hosters repoint the client by editing that one
@@ -219,7 +198,6 @@ async function boot() {
     const apiParam = cspOriginOf(req.query && req.query.api);
     if (apiParam) extra.push(apiParam, wsOriginOf(apiParam));
     res.setHeader('Content-Security-Policy', req.path.indexOf('showcase') !== -1 ? buildCsp(true, extra) : buildCsp(false, extra));
->>>>>>> main
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -408,21 +386,14 @@ async function boot() {
     console.log('[info] serving public website from ' + publicDir);
   }
 
-<<<<<<< HEAD
-  const { broadcast, broadcastDm, sendToUser, isOnline, getPresence, issueTicket, disconnectUser } = createGateway(server);
-=======
   const { broadcast, broadcastDm, sendToUser, isOnline, getPresence, issueTicket, disconnectUser, broadcastServer, evictUserFromServer } = createGateway(server);
->>>>>>> main
   require('./routes/auth').setTicketIssuer(issueTicket);
   require('./routes/messages').setBroadcaster(broadcast);
   require('./routes/dms').setGateway({ broadcastDm, sendToUser, isOnline });
   require('./routes/friends').setGateway({ sendToUser });
   require('./routes/users').setGateway({ getPresence });
   require('./routes/admin').setGateway({ disconnectUser });
-<<<<<<< HEAD
-=======
   require('./services/events').setGateway({ broadcast: broadcastServer, evict: evictUserFromServer });
->>>>>>> main
 
   // Trust & Safety: bootstrap platform admins from ADMIN_USERNAMES before
   // the server accepts traffic. Idempotent — re-runs promote any new names

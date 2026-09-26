@@ -110,8 +110,6 @@ router.post('/users/:id/lift', async (req, res, next) => {
   } catch (e) { serviceError(res, e); }
 });
 
-<<<<<<< HEAD
-=======
 // Bot identity is server-controlled and persisted: only platform admins can
 // flip it. The flag flows into member lists, search, and profiles so the
 // client can answer "is this a bot?" from real data, never heuristics.
@@ -133,7 +131,6 @@ router.post('/users/:id/bot', async (req, res, next) => {
   } catch (e) { serviceError(res, e); }
 });
 
->>>>>>> main
 // --- servers ---
 
 router.get('/servers', async (req, res, next) => {

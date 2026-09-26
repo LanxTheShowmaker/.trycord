@@ -32,12 +32,9 @@ function publicUser(row) {
     avatarUrl: row.avatar_url || null,
     bannerUrl: row.banner_url || null,
     statusText: row.status_text || null,
-<<<<<<< HEAD
-=======
     // Server-controlled bot identity (platform admins set it). Rows that do
     // not select the column default to false — never inferred client-side.
     isBot: !!row.is_bot,
->>>>>>> main
   };
 }
 
@@ -165,11 +162,7 @@ router.get('/search', rateLimit({ windowMs: 60000, max: 60 }), async (req, res, 
     if (q.length < 2) return fail(res, 'VALIDATION_ERROR', 'type at least 2 characters to search');
     const lit = escapeLike(q);
     const rows = await db.all(
-<<<<<<< HEAD
-      `SELECT id, username, display_name, created_at, bio, avatar_url, banner_url, status_text FROM users
-=======
       `SELECT id, username, display_name, created_at, bio, avatar_url, banner_url, status_text, is_bot FROM users
->>>>>>> main
        WHERE username LIKE ? ESCAPE '!' OR username LIKE ? ESCAPE '!'
        ORDER BY CASE WHEN username LIKE ? ESCAPE '!' THEN 0 ELSE 1 END, username
        LIMIT 20`,
@@ -196,11 +189,7 @@ router.get('/presence', async (req, res, next) => {
 router.get('/:id', async (req, res, next) => {
   try {
     const row = await db.get(
-<<<<<<< HEAD
-      'SELECT id, username, display_name, created_at, bio, avatar_url, banner_url, status_text FROM users WHERE id = ?',
-=======
       'SELECT id, username, display_name, created_at, bio, avatar_url, banner_url, status_text, is_bot FROM users WHERE id = ?',
->>>>>>> main
       [req.params.id]
     );
     if (!row) return fail(res, 'NOT_FOUND', 'user not found');
@@ -222,8 +211,6 @@ router.get('/:id', async (req, res, next) => {
         ? (String(pending.from_user_id) === String(me) ? 'pending-out' : 'pending-in')
         : 'none';
     }
-<<<<<<< HEAD
-=======
     // Community-aware profile: when the viewer names a server they both
     // belong to, attach that community's membership (nickname, roles,
     // joined date). Never leaks memberships of other servers.
@@ -248,7 +235,6 @@ router.get('/:id', async (req, res, next) => {
         };
       }
     }
->>>>>>> main
     res.json(profile);
   } catch (e) { serviceError(res, e); }
 });

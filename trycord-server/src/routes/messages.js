@@ -7,10 +7,7 @@ const rateLimit = require('../middleware/ratelimit');
 const { fail, serviceError } = require('../errors');
 const { now, uuid, visibleChannel } = require('../util');
 const { hasPermission } = require('../services/permissions');
-<<<<<<< HEAD
-=======
 const memberships = require('../services/memberships');
->>>>>>> main
 const uploads = require('../services/uploads');
 
 let broadcast = () => {};

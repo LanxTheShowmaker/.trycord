@@ -8,10 +8,7 @@ const { resolveServer, requireMember, requireOwner, requirePerm } = require('../
 const { fail, serviceError } = require('../errors');
 const servers = require('../services/servers');
 const memberships = require('../services/memberships');
-<<<<<<< HEAD
-=======
 const events = require('../services/events');
->>>>>>> main
 const permissions = require('../services/permissions');
 
 const router = express.Router();
@@ -66,13 +63,9 @@ router.patch('/:id', resolveServer, requirePerm('MANAGE_SERVER'), async (req, re
   try {
     const { name, description, isPublic, isDiscoverable } = req.body || {};
     await servers.update(req.server.id, { name, description, isPublic, isDiscoverable });
-<<<<<<< HEAD
-    res.json(await servers.detail(req.server.id, req.user.id, req.access && req.access.permissions));
-=======
     const detail = await servers.detail(req.server.id, req.user.id, req.access && req.access.permissions);
     events.emit(req.server.id, 'server_updated', { server: { id: detail.id, name: detail.name } });
     res.json(detail);
->>>>>>> main
   } catch (e) { serviceError(res, e); }
 });
 
@@ -102,8 +95,6 @@ router.post('/:id/kick', resolveServer, requirePerm('KICK_MEMBERS'), async (req,
   } catch (e) { serviceError(res, e); }
 });
 
-<<<<<<< HEAD
-=======
 // Ban: persistent per-server ban (member removed now, rejoin blocked until
 // lifted/expired). Hierarchy is enforced in the service; BAN_MEMBERS gates.
 router.post('/:id/ban', resolveServer, requirePerm('BAN_MEMBERS'), async (req, res, next) => {
@@ -138,7 +129,6 @@ router.post('/:id/timeout', resolveServer, requirePerm('BAN_MEMBERS'), async (re
   } catch (e) { serviceError(res, e); }
 });
 
->>>>>>> main
 // Set/clear a member nickname. Anyone may set their own; staff (KICK_MEMBERS)
 // may set any member's. resolver + memberships gate membership itself.
 router.patch('/:id/members/:userId/nickname', resolveServer, requireMember, async (req, res, next) => {
@@ -151,13 +141,9 @@ router.patch('/:id/members/:userId/nickname', resolveServer, requireMember, asyn
         return fail(res, 'PERMISSION_DENIED', 'you can only change your own nickname here');
       }
     }
-<<<<<<< HEAD
-    res.json(await memberships.setNickname(req.server.id, targetId, (req.body || {}).nickname));
-=======
     const out = await memberships.setNickname(req.server.id, targetId, (req.body || {}).nickname);
     events.emit(req.server.id, 'member_updated', { userId: String(targetId) });
     res.json(out);
->>>>>>> main
   } catch (e) { serviceError(res, e); }
 });
 

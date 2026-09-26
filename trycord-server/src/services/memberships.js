@@ -28,12 +28,8 @@ async function list(serverId) {
   // Member rows and their roles are independent queries — run together.
   const [members, roleRows] = await Promise.all([
     db.all(
-<<<<<<< HEAD
-      `SELECT u.id, u.username, u.display_name, u.avatar_url, m.nickname, m.joined_at,
-=======
       `SELECT u.id, u.username, u.display_name, u.avatar_url, u.status_text,
         u.is_bot, m.nickname, m.joined_at, m.timeout_expires_at,
->>>>>>> main
         CASE WHEN u.id = s.owner_id THEN 1 ELSE 0 END AS is_owner
       FROM server_members m
       JOIN users u ON u.id = m.user_id
@@ -43,11 +39,7 @@ async function list(serverId) {
       [serverId]
     ),
     db.all(
-<<<<<<< HEAD
-      `SELECT mr.user_id, r.id, r.name, r.position FROM member_roles mr
-=======
       `SELECT mr.user_id, r.id, r.name, r.color, r.position FROM member_roles mr
->>>>>>> main
        JOIN roles r ON r.id = mr.role_id
        WHERE mr.server_id = ? ORDER BY r.position DESC`,
       [serverId]
@@ -174,31 +166,6 @@ async function leave(serverId, userId) {
   return out;
 }
 
-<<<<<<< HEAD
-// Set or clear a member's per-community nickname. The route gates who may
-// call this (self = anyone; others = staff with KICK_MEMBERS). NULL clears.
-async function setNickname(serverId, targetId, nickname, conn = db) {
-  const clean = String(nickname == null ? '' : nickname).trim();
-  if (clean && (clean.length < 2 || clean.length > 32)) {
-    const e = new Error('nickname must be 2-32 characters');
-    e.code = 'VALIDATION_ERROR'; throw e;
-  }
-  if (!(await get(serverId, targetId, conn))) {
-    const e = new Error('not a member');
-    e.code = 'NOT_A_MEMBER'; throw e;
-  }
-  await conn.run(
-    'UPDATE server_members SET nickname = ? WHERE server_id = ? AND user_id = ?',
-    [clean || null, serverId, targetId]
-  );
-  return { serverId, userId: targetId, nickname: clean || null };
-}
-
-async function kick(serverId, actorId, targetId) {
-  return db.transaction(async (t) => {
-    const srv = await t.get('SELECT owner_id FROM servers WHERE id = ?', [serverId]);
-    if (!srv) throw { code: 'SERVER_NOT_FOUND', message: 'server not found' };
-=======
 // Ban: persistent per-server ban state. The target is removed immediately
 // (like a kick) and cannot rejoin until unbanned or the ban expires.
 // minutes null/omitted = permanent.
@@ -254,7 +221,6 @@ async function listBans(serverId) {
 async function timeout(serverId, actorId, targetId, minutes) {
   const out = await db.transaction(async (t) => {
     await assertManageable(serverId, actorId, targetId, 'timed out', t);
->>>>>>> main
     if (!(await get(serverId, targetId, t))) throw { code: 'NOT_A_MEMBER', message: 'user is not a member' };
     const exp = expiresAt(minutes);
     await t.run('UPDATE server_members SET timeout_expires_at = ? WHERE server_id = ? AND user_id = ?',
@@ -265,9 +231,6 @@ async function timeout(serverId, actorId, targetId, minutes) {
   return out;
 }
 
-<<<<<<< HEAD
-module.exports = { get, list, join, joinByCode, joinIn, leave, kick, setNickname };
-=======
 async function isTimedOut(serverId, userId, conn = db) {
   const row = await conn.get('SELECT timeout_expires_at FROM server_members WHERE server_id = ? AND user_id = ?', [serverId, userId]);
   return !!(row && row.timeout_expires_at && new Date(row.timeout_expires_at).getTime() > Date.now());
@@ -277,4 +240,3 @@ module.exports = {
   get, list, join, joinByCode, joinIn, leave, kick, setNickname,
   ban, unban, listBans, timeout, isTimedOut,
 };
->>>>>>> main

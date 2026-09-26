@@ -75,10 +75,7 @@ function tables(engine) {
       server_id VARCHAR(64) NOT NULL,
       nickname  TEXT,
       joined_at VARCHAR(64) NOT NULL,
-<<<<<<< HEAD
-=======
       timeout_expires_at VARCHAR(64),
->>>>>>> main
       UNIQUE (user_id, server_id),
       FOREIGN KEY (user_id) REFERENCES users(id),
       FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
@@ -377,13 +374,10 @@ const LEGACY_ALTERS = [
   ['users', 'avatar_url', 'ALTER TABLE users ADD COLUMN avatar_url VARCHAR(512)'],
   ['users', 'banner_url', 'ALTER TABLE users ADD COLUMN banner_url VARCHAR(512)'],
   ['users', 'status_text', 'ALTER TABLE users ADD COLUMN status_text VARCHAR(128)'],
-<<<<<<< HEAD
-=======
   // F1/F2 community overhaul: persisted role colors, bot identity, timeouts.
   ['users', 'is_bot', 'ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0'],
   ['roles', 'color', 'ALTER TABLE roles ADD COLUMN color VARCHAR(16)'],
   ['server_members', 'timeout_expires_at', 'ALTER TABLE server_members ADD COLUMN timeout_expires_at VARCHAR(64)'],
->>>>>>> main
 ];
 
 // Existing MySQL databases may already have these stored as TEXT. Convert
@@ -419,12 +413,9 @@ const MYSQL_ADD = [
   ['users', 'avatar_url', 'ALTER TABLE users ADD COLUMN avatar_url VARCHAR(512)'],
   ['users', 'banner_url', 'ALTER TABLE users ADD COLUMN banner_url VARCHAR(512)'],
   ['users', 'status_text', 'ALTER TABLE users ADD COLUMN status_text VARCHAR(128)'],
-<<<<<<< HEAD
-=======
   ['users', 'is_bot', 'ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0'],
   ['roles', 'color', 'ALTER TABLE roles ADD COLUMN color VARCHAR(16)'],
   ['server_members', 'timeout_expires_at', 'ALTER TABLE server_members ADD COLUMN timeout_expires_at VARCHAR(64)'],
->>>>>>> main
 ];
 
 const INDEXES = [
