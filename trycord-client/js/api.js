@@ -9,17 +9,22 @@ import { TrycordConfig } from './config.js';
 const TOKEN_KEY = 'trycord.token';
 
 export class ApiError extends Error {
-  constructor(code, message, status, retryAfter) {
+  constructor(code, message, status, retryAfter, details) {
     super(message || code);
     this.name = 'ApiError';
     this.code = code || 'INTERNAL';
     this.status = status || 500;
     this.retryAfter = retryAfter || 0;
+    // Server-provided context (e.g. the action id on ACCOUNT_ENFORCED).
+    // Never sensitive: the server decides what goes in here.
+    this.details = details || null;
   }
 }
 
+const REQUEST_TIMEOUT_MS = 25000;
+
 function base() {
-  return TrycordConfig.apiUrl().replace(/\/+$/, '');
+  return TrycordConfig.backendUrl().replace(/\/+$/, '');
 }
 
 export function token() {
@@ -50,10 +55,15 @@ async function request(method, path, { body, auth = true, raw = false, form = fa
     payload = JSON.stringify(body);
   }
   let res;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
   try {
-    res = await fetch(url, { method, headers, body: payload, credentials: 'omit' });
-  } catch {
+    res = await fetch(url, { method, headers, body: payload, credentials: 'omit', signal: ctrl.signal });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new ApiError('TIMEOUT', 'the request timed out — the backend may be unreachable', 0);
     throw new ApiError('NETWORK', 'cannot reach the Trycord server', 0);
+  } finally {
+    clearTimeout(timer);
   }
   if (res.status === 401) {
     // Token missing/bad/revoked: drop it and surface a typed error so the
@@ -61,7 +71,7 @@ async function request(method, path, { body, auth = true, raw = false, form = fa
     if (auth) setToken(null);
     try {
       const e = await res.json().catch(() => null);
-      if (e && e.error) throw new ApiError(e.error.code, e.error.message, 401);
+      if (e && e.error) throw new ApiError(e.error.code, e.error.message, 401, 0, e.error.details);
     } catch (err) { if (err instanceof ApiError) throw err; }
     throw new ApiError('AUTH_REQUIRED', 'you need to sign in', 401);
   }
@@ -70,7 +80,7 @@ async function request(method, path, { body, auth = true, raw = false, form = fa
     try { info = await res.json(); } catch { /* non-json error */ }
     const retryAfter = parseInt(res.headers.get('Retry-After') || '0', 10) || 0;
     if (info && info.error) {
-      throw new ApiError(info.error.code, info.error.message, res.status, retryAfter);
+      throw new ApiError(info.error.code, info.error.message, res.status, retryAfter, info.error.details);
     }
     throw new ApiError('HTTP_' + res.status, res.statusText || 'request failed', res.status, retryAfter);
   }
@@ -106,7 +116,7 @@ const Api = {
   updateMe: (body) => request('PATCH', '/api/users/me', { body }),
   searchUsers: (q) => request('GET', '/api/users/search?q=' + encodeURIComponent(q)),
   presence: (ids) => request('GET', '/api/users/presence?ids=' + encodeURIComponent(ids.join(','))),
-  user: (id) => request('GET', '/api/users/' + encodeURIComponent(id)),
+  user: (id, serverId) => request('GET', '/api/users/' + encodeURIComponent(id) + (serverId ? '?serverId=' + encodeURIComponent(serverId) : '')),
   legacyMe: () => request('GET', '/api/me'),
 
   // ---- profile media -----------------------------------------------------
@@ -129,6 +139,10 @@ const Api = {
   serverMembers: (id) => request('GET', '/api/servers/' + encodeURIComponent(id) + '/members'),
   leaveServer: (id) => request('POST', '/api/servers/' + encodeURIComponent(id) + '/leave'),
   kickMember: (id, userId) => request('POST', '/api/servers/' + encodeURIComponent(id) + '/kick', { body: { userId } }),
+  banMember: (id, userId, body) => request('POST', '/api/servers/' + encodeURIComponent(id) + '/ban', { body: { userId, ...(body || {}) } }),
+  unbanMember: (id, userId) => request('POST', '/api/servers/' + encodeURIComponent(id) + '/unban', { body: { userId } }),
+  serverBans: (id) => request('GET', '/api/servers/' + encodeURIComponent(id) + '/bans'),
+  timeoutMember: (id, userId, minutes) => request('POST', '/api/servers/' + encodeURIComponent(id) + '/timeout', { body: { userId, minutes } }),
   setNickname: (serverId, userId, nickname) =>
     request('PATCH', '/api/servers/' + encodeURIComponent(serverId) + '/members/' + encodeURIComponent(userId) + '/nickname', { body: { nickname } }),
   serverByCode: (code) => request('GET', '/api/servers/by-code/' + encodeURIComponent(code)),
@@ -147,6 +161,12 @@ const Api = {
   createCategory: (serverId, body) => request('POST', '/api/servers/' + encodeURIComponent(serverId) + '/categories', { body }),
   deleteCategory: (serverId, categoryId) =>
     request('DELETE', '/api/servers/' + encodeURIComponent(serverId) + '/categories/' + encodeURIComponent(categoryId)),
+  renameCategory: (serverId, categoryId, name) =>
+    request('PATCH', '/api/servers/' + encodeURIComponent(serverId) + '/categories/' + encodeURIComponent(categoryId), { body: { name } }),
+  reorderCategories: (serverId, orderedIds) =>
+    request('POST', '/api/servers/' + encodeURIComponent(serverId) + '/categories/reorder', { body: { orderedIds } }),
+  reorderChannels: (serverId, orderedIds) =>
+    request('POST', '/api/servers/' + encodeURIComponent(serverId) + '/channels/reorder', { body: { orderedIds } }),
 
   // ---- messages -------------------------------------------------------------
   messages: (channelId, { before, limit } = {}) => {
@@ -185,6 +205,8 @@ const Api = {
     request('POST', '/api/servers/' + encodeURIComponent(serverId) + '/roles/' + encodeURIComponent(roleId) + '/assign', { body: { userId } }),
   unassignRole: (serverId, roleId, userId) =>
     request('DELETE', '/api/servers/' + encodeURIComponent(serverId) + '/roles/' + encodeURIComponent(roleId) + '/assign/' + encodeURIComponent(userId)),
+  reorderRoles: (serverId, orderedIds) =>
+    request('POST', '/api/servers/' + encodeURIComponent(serverId) + '/roles/reorder', { body: { orderedIds } }),
 
   // ---- invites ---------------------------------------------------------------------
   invites: (serverId) => request('GET', '/api/servers/' + encodeURIComponent(serverId) + '/invites'),
@@ -227,6 +249,12 @@ joinDiscover: (id) =>
 
   // ---- activity ---------------------------------------------------------------------
   activity: ({ limit = 20 } = {}) => request('GET', '/api/activity?limit=' + limit),
+
+  // ---- support / appeals ------------------------------------------------------
+  // Submit is anonymous by design (possession of the action id is the key);
+  // listing is scoped to the signed-in user.
+  submitAppeal: (body) => request('POST', '/api/appeals', { body, auth: false }),
+  myAppeals: () => request('GET', '/api/appeals/mine'),
 
   // ---- dms -----------------------------------------------------------------------
   dms: () => request('GET', '/api/dms'),
@@ -271,13 +299,26 @@ joinDiscover: (id) =>
       { body: { actionType, reason, expiresInHours: hours, reportId, confirm } }),
   adminLiftUser: (userId, reason) =>
     request('POST', '/api/admin/users/' + encodeURIComponent(userId) + '/lift', { body: { reason } }),
+  adminSetBot: (userId, isBot) =>
+    request('POST', '/api/admin/users/' + encodeURIComponent(userId) + '/bot', { body: { isBot: !!isBot } }),
   adminServers: ({ q = '', limit = 25 } = {}) =>
     request('GET', '/api/admin/servers?q=' + encodeURIComponent(q) + '&limit=' + limit),
   adminServerActions: (serverId) =>
     request('GET', '/api/admin/servers/' + encodeURIComponent(serverId) + '/actions'),
-  adminEnforceServer: (serverId, actionType, reason, { reportId, confirm } = {}) =>
-    request('POST', '/api/admin/servers/' + encodeURIComponent(serverId) + '/enforce',
-      { body: { actionType, reason, reportId, confirm } }),
+  adminEnforceServer: (serverId, actionType, reason, { reportId, confirm } = {}) => {
+    // The server exposes suspend/remove (there is no /enforce endpoint):
+    // route here so every caller uses the real contract.
+    const type = String(actionType || '').toUpperCase();
+    if (type === 'SERVER_REMOVAL') {
+      return request('POST', '/api/admin/servers/' + encodeURIComponent(serverId) + '/remove',
+        { body: { reason, confirm } });
+    }
+    if (type === 'SERVER_SUSPENSION') {
+      return request('POST', '/api/admin/servers/' + encodeURIComponent(serverId) + '/suspend',
+        { body: { reason, reportId } });
+    }
+    throw new Error('Unknown community action: ' + String(actionType || '(none)'));
+  },
   adminLiftServer: (serverId, reason) =>
     request('POST', '/api/admin/servers/' + encodeURIComponent(serverId) + '/lift', { body: { reason } }),
   adminReports: ({ status, limit = 50 } = {}) => {

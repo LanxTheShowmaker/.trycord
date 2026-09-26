@@ -11,6 +11,13 @@ uploads/
 
 # build outputs (never commit binaries)
 release/
+release-fresh/
 dist/
 trycord-desktop/client/
 *.zip
+
+# runtime logs
+*.log
+
+# documentation is model-instruction only — never commit markdown
+*.md

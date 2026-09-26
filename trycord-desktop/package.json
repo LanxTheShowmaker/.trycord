@@ -1,6 +1,6 @@
 {
   "name": "trycord-desktop",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Trycord desktop app: the web client in a native desktop window",
   "author": "Trycord",
   "repository": {
@@ -17,7 +17,7 @@
   "scripts": {
     "dev": "node scripts/copy-client.js && electron .",
     "start": "node scripts/copy-client.js && electron .",
-    "smoke": "node scripts/copy-client.js && electron . --smoke-test",
+    "smoke": "node scripts/copy-client.js && electron . --smoke-test --api-url=http://localhost:9971",
     "dist": "node scripts/copy-client.js && electron-builder --win portable --publish never",
     "build": "node scripts/copy-client.js && electron-builder --publish never",
     "build:win": "node scripts/copy-client.js && electron-builder --win --publish never",
@@ -43,8 +43,9 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "LanxTheShowmaker",
-        "repo": ".trycord"
+        "owner": "trycord",
+        "repo": ".trycord",
+        "releaseType": "release"
       }
     ],
     "win": {
@@ -73,7 +74,7 @@
       "artifactName": "Trycord.${ext}"
     },
     "portable": {
-      "artifactName": "Trycord-PTB.${ext}"
+      "artifactName": "TrycordPTB.${ext}"
     },
     "linux": {
       "icon": "build/icon.png",

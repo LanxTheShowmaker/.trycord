@@ -2,8 +2,10 @@
 
 import Api from './api.js';
 import { esc, el, clear, toast, qs } from './ui.js';
-import State, { applyAuth, isAuthed } from './state.js';
+import State, { applyAuth, isAuthed, clearSession } from './state.js';
 import { renderContextHeader } from './shell.js';
+import { TrycordConfig, BACKEND_URL } from './config.js';
+import Realtime from './realtime.js';
 
 let legal = { termsVersion: '1.0', privacyVersion: '1.0' };
 Api.legal().then((l) => { if (l) legal = l; }).catch(() => {});
@@ -39,9 +41,20 @@ function loginForm(container) {
       applyAuth(res);
       toast('Signed in.', 'ok');
       location.hash = '#/home';
+      // Fresh sign-in (not a boot restore): bring the realtime gateway up
+      // now instead of waiting for the next reload.
+      Realtime.connect();
     } catch (ex) {
       err.hidden = false;
-      err.textContent = ex.message || 'Sign in failed';
+      clear(err);
+      err.appendChild(el('span', {}, ex.message || 'Sign in failed'));
+      // Enforced accounts get their action id back from the server: link
+      // straight to the appeal form with it prefilled.
+      const actionId = ex && ex.details && ex.details.actionId;
+      if (ex && ex.code === 'ACCOUNT_ENFORCED' && actionId) {
+        err.appendChild(el('div', { style: { marginTop: 'var(--t-d-2)' } },
+          el('a', { class: 'btn sm', href: '#/support/appeals/new?action=' + encodeURIComponent(actionId) }, 'Appeal this decision')));
+      }
     } finally {
       busy = false;
       submit.removeAttribute('aria-busy');
@@ -50,10 +63,13 @@ function loginForm(container) {
   });
 
   card.appendChild(form);
+  const backendBox = el('div', { style: { marginTop: 'var(--t-d-5)' } });
+  renderBackendSelector(backendBox);
+  card.appendChild(backendBox);
   card.appendChild(el('p', { class: 'auth-alt' },
     'New here? ', el('a', { href: '#/register' }, 'Create an account')));
   card.appendChild(el('p', { class: 'auth-alt' },
-    el('a', { href: '#/forgot' }, 'Forgot password?')));
+    el('a', { href: '#/forgot' }, 'Forgot password?'), ' · ', el('a', { href: '#/support' }, 'Support')));
   box.appendChild(card);
   container.appendChild(box);
   username.focus();
@@ -125,6 +141,8 @@ function registerForm(container) {
       applyAuth(res);
       toast('Account created.', 'ok');
       location.hash = '#/home';
+      // Fresh registration: bring the realtime gateway up now.
+      Realtime.connect();
     } catch (ex) {
       err.hidden = false;
       err.textContent = ex.message || 'Registration failed';
@@ -136,8 +154,11 @@ function registerForm(container) {
   });
 
   card.appendChild(form);
+  const backendBox = el('div', { style: { marginTop: 'var(--t-d-5)' } });
+  renderBackendSelector(backendBox);
+  card.appendChild(backendBox);
   card.appendChild(el('p', { class: 'auth-alt' },
-    'Already registered? ', el('a', { href: '#/login' }, 'Sign in')));
+    'Already registered? ', el('a', { href: '#/login' }, 'Sign in'), ' · ', el('a', { href: '#/support' }, 'Support')));
   box.appendChild(card);
   container.appendChild(box);
   username.focus();
@@ -168,7 +189,7 @@ function forgotForm(container) {
     try {
       const res = await Api.forgotPassword({ email: email.value.trim() });
       ok.hidden = false;
-      ok.textContent = res.message || "If an account exists for that email, you'll receive a reset link.";
+      ok.textContent = (res && res.message) || "If an account exists for that email, you'll receive a reset link.";
     } catch (ex) {
       err.hidden = false;
       err.textContent = ex.message || 'Request failed';
@@ -282,5 +303,92 @@ const PagesPublic = {
   legal: legalPage,
   currentLegal: () => legal,
 };
+
+// Backend selector: which Trycord server this client talks to. Rendered on
+// auth cards (pre-login, where it matters most) and reused by settings.
+// Shows the resolved BACKEND_URL + its source, validates input, tests the
+// connection against /api/instance, persists the choice, and resets to the
+// configured default. Switching backends while signed in drops the session
+// (tokens belong to one backend) and reloads.
+export function renderBackendSelector(mount) {
+  clear(mount);
+  const url = BACKEND_URL();
+  const source = TrycordConfig.backendSource();
+
+  mount.appendChild(el('div', { class: 'section-label' }, 'Backend'));
+  const current = el('div', { class: 'row-line', style: { marginBottom: 'var(--t-d-2)' } },
+    el('span', { class: 'muted small', style: { overflowWrap: 'anywhere' } }, url),
+    el('span', { class: 'badge' }, source));
+  mount.appendChild(current);
+
+  const input = el('input', { class: 'input', type: 'url', inputmode: 'url', value: url, placeholder: 'https://api.example.com' });
+  const status = el('div', { class: 'muted small', 'aria-live': 'polite', style: { minHeight: '1.2em' } },
+    'Default: the official backend. Point here at your own instance to self-host.');
+  const row = el('div', { class: 'row-line', style: { marginTop: 'var(--t-d-2)' } });
+  const saveBtn = el('button', { class: 'btn sm', type: 'button' }, 'Save');
+  const testBtn = el('button', { class: 'btn ghost sm', type: 'button' }, 'Test connection');
+  const resetBtn = el('button', { class: 'btn ghost sm', type: 'button' }, 'Reset to default');
+  row.append(saveBtn, testBtn, resetBtn);
+  mount.appendChild(el('div', { class: 'field' }, el('label', {}, 'Backend URL'), input, row, status));
+
+  let testing = false;
+  testBtn.addEventListener('click', async () => {
+    if (testing) return;
+    testing = true;
+    testBtn.setAttribute('aria-busy', 'true');
+    status.textContent = 'Testing connection…';
+    const res = await TrycordConfig.testBackend(input.value.trim());
+    testing = false;
+    testBtn.removeAttribute('aria-busy');
+    status.textContent = res.ok ? '● Connected — ' + res.name : res.error;
+  });
+  saveBtn.addEventListener('click', () => {
+    const next = TrycordConfig.setApiUrl(input.value.trim());
+    if (!next) {
+      status.textContent = 'Enter a valid http(s) URL, e.g. https://api.example.com';
+      return;
+    }
+    if (next === url && !isAuthed()) {
+      status.textContent = 'Backend saved — ' + next;
+      renderBackendSelector(mount);
+      return;
+    }
+    if (isAuthed()) {
+      // Sessions belong to one backend: sign out everywhere in this client
+      // and reboot against the new backend.
+      try { Realtime.disconnect(); } catch { /* ignore */ }
+      clearSession();
+    }
+    toast('Backend switched. Reloading…', 'ok');
+    // Reload WITH ?api=: the serving server reflects the configured backend
+    // into its CSP connect-src, so the rebooted page may actually reach it.
+    // Hash routing is preserved.
+    try {
+      const u = new URL(location.href);
+      u.searchParams.set('api', next);
+      location.href = u.toString();
+    } catch {
+      location.reload();
+    }
+  });
+  resetBtn.addEventListener('click', () => {
+    TrycordConfig.resetBackend();
+    if (isAuthed()) {
+      try { Realtime.disconnect(); } catch { /* ignore */ }
+      clearSession();
+      toast('Backend reset. Reloading…', 'ok');
+      try {
+        const u = new URL(location.href);
+        u.searchParams.delete('api');
+        location.href = u.toString();
+      } catch {
+        location.reload();
+      }
+      return;
+    }
+    renderBackendSelector(mount);
+    toast('Backend reset to default.', 'ok');
+  });
+}
 
 export default PagesPublic;
